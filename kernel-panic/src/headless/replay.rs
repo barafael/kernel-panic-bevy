@@ -122,6 +122,10 @@ pub struct Played {
 }
 
 /// Play `replay` on `map`.
+/// Frames without a tick before [`play`] gives up (a replay never
+/// waits: every turn is in the log).
+const STALLED_FRAMES: u32 = 300;
+
 pub async fn play(
     replay: &Replay,
     map: MapInput,
@@ -149,17 +153,34 @@ pub async fn play(
             at: w[0].tick,
         });
     }
-    // The log as turns, one per tick (the clock below runs one tick a
-    // frame: no catch-up).
+    // The log as turns, one per tick. Frames of 1/30 s: one tick each
+    // (no catch-up), or as many as a player's speed change makes the
+    // driver run — the sim is a function of the turns, not of how they
+    // fall into frames.
     let net = NetSession::replay(&replay.frames, ticks as u32);
     h.world_mut().insert_resource(net);
     let mut shuffle_rng = 0x5eed_u32;
+    let mut next_shuffle = 0;
+    let mut idle = 0;
+    #[cfg(target_arch = "wasm32")]
+    let mut frames = 0u64;
     let (mut sim_secs, mut frame_secs) = (0.0, 0.0);
     while h.tick < ticks {
-        if options.shuffle_every > 0 && h.tick.is_multiple_of(options.shuffle_every as u64) {
+        if options.shuffle_every > 0 && h.tick >= next_shuffle {
             shuffle_storage(h.world_mut(), &mut shuffle_rng);
+            next_shuffle = h.tick + options.shuffle_every as u64;
         }
-        h.step();
+        if h.frame(1) == 0 {
+            idle += 1;
+            if idle > STALLED_FRAMES {
+                return Err(ReplayError::Check(format!(
+                    "no tick for {STALLED_FRAMES} frames at tick {}",
+                    h.tick
+                )));
+            }
+        } else {
+            idle = 0;
+        }
         sim_secs += h
             .take_tick_times()
             .iter()
@@ -167,9 +188,13 @@ pub async fn play(
             .sum::<f64>();
         frame_secs += h.last_frame.as_secs_f64();
         // Browsers kill scripts that never return to the event loop.
+        // By frames: a frame of several ticks may step over a multiple.
         #[cfg(target_arch = "wasm32")]
-        if h.tick.is_multiple_of(256) {
-            super::pause().await;
+        {
+            frames += 1;
+            if frames.is_multiple_of(256) {
+                super::pause().await;
+            }
         }
     }
     let mut log = h.world_mut().resource_mut::<HashLog>();
@@ -366,6 +391,30 @@ mod tests {
             Replay::decode(b"nonsense"),
             Err(ReplayError::Magic)
         ));
+    }
+
+    /// A player's speed change in the log: the driver then runs several
+    /// ticks a frame, and the replay plays through all the same (it
+    /// asserted one tick per frame: every saved match where someone
+    /// sped the game up failed to replay).
+    #[test]
+    fn replays_a_speed_change() {
+        let mut r = sample();
+        r.setup.map = "Data_Cache_L1".into();
+        let map = MapInput::checkout(&r.setup.map).expect("the shipped map");
+        let speed = |tick, percent| CommandFrame {
+            tick,
+            player: 0,
+            commands: vec![SimCommand::SetSpeed { percent }],
+        };
+        let r = Replay::record(
+            r.setup,
+            &map.bytes,
+            90,
+            [speed(3, MatchRules::default().max_speed), speed(40, 100)],
+        );
+        let played = bevy::tasks::block_on(play(&r, map, &PlayOptions::default())).unwrap();
+        assert_eq!(played.hashes.len(), 90);
     }
 
     #[test]

@@ -806,6 +806,7 @@ struct MenuActionMessage {
 
 /// Press "Back to room" (the Esc overlay's plate in a networked match):
 /// the tests, the bot's `room`.
+#[cfg(any(test, not(target_arch = "wasm32")))]
 pub(crate) fn press_back_to_room(world: &mut World) {
     world.write_message(MenuActionMessage {
         action: MenuAction::BackToRoom,
