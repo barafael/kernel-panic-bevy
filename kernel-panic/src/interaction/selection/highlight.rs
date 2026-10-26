@@ -305,7 +305,7 @@ const GLOW_STEPS: u8 = 32;
 
 /// `glPolygonOffset(-2, -2)`: the glow wins the depth test against the
 /// surface it covers.
-const GLOW_DEPTH_BIAS: f32 = 2.0;
+pub(crate) const GLOW_DEPTH_BIAS: f32 = 2.0;
 
 /// The glow materials by [`glow_shade`].
 #[derive(Resource, Default)]
@@ -344,20 +344,28 @@ fn glow_material((step, cloaked): (u8, bool)) -> StandardMaterial {
     }
 }
 
+/// Overlays [`update_selection_glow`] spawns in one frame, at most.
+/// Selecting a whole army at once would otherwise spawn thousands of
+/// render entities (one per piece) in a single frame; past the budget,
+/// the rest of the units start glowing over the next few frames.
+const GLOW_SPAWNS_PER_FRAME: usize = 512;
+
 /// KP's selection highlight: every selected unit glows in its health
 /// colour (`HilightUnit` for each of `spGetSelectedUnits`). The glow
 /// follows the health and the cloak, and goes with the selection.
-#[allow(clippy::type_complexity)]
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn update_selection_glow(
-    selected: Query<
-        (Entity, Option<&Health>, Has<Cloaked>, Option<&Glow>),
+    mut selected: Query<
+        (Entity, Option<&Health>, Has<Cloaked>, Option<&mut Glow>),
         (With<Selected>, With<UnitType>),
     >,
     deselected: Query<(Entity, &Glow), Without<Selected>>,
     children_q: Query<&Children>,
     pieces: Query<&Mesh3d, With<PieceIndex>>,
+    mut overlay_mats: Query<&mut MeshMaterial3d<StandardMaterial>, With<SelectionGlow>>,
     mut glows: ResMut<GlowMaterials>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut pieces_found: Local<Vec<(Entity, Handle<Mesh>)>>,
     mut commands: Commands,
 ) {
     for (unit, glow) in &deselected {
@@ -366,9 +374,13 @@ fn update_selection_glow(
         }
         commands.entity(unit).try_remove::<Glow>();
     }
-    for (unit, health, cloaked, glow) in &selected {
+    let mut spawned = 0;
+    for (unit, health, cloaked, glow) in &mut selected {
         let shade = glow_shade(health, cloaked);
-        if glow.is_some_and(|g| g.shade == shade) {
+        if glow.as_ref().is_some_and(|g| g.shade == shade) {
+            continue;
+        }
+        if glow.is_none() && spawned >= GLOW_SPAWNS_PER_FRAME {
             continue;
         }
         let material = glows
@@ -376,20 +388,22 @@ fn update_selection_glow(
             .entry(shade)
             .or_insert_with(|| materials.add(glow_material(shade)))
             .clone();
-        let overlays = match glow {
-            Some(glow) => {
+        match glow {
+            // A new shade: the overlays change material in place.
+            Some(mut glow) => {
+                glow.shade = shade;
                 for &overlay in &glow.overlays {
-                    commands
-                        .entity(overlay)
-                        .try_insert(MeshMaterial3d(material.clone()));
+                    if let Ok(mut worn) = overlay_mats.get_mut(overlay) {
+                        worn.0 = material.clone();
+                    }
                 }
-                glow.overlays.clone()
             }
             None => {
-                let mut pieces_found = Vec::new();
+                pieces_found.clear();
                 collect_pieces(unit, &children_q, &pieces, &mut pieces_found);
-                pieces_found
-                    .into_iter()
+                spawned += pieces_found.len();
+                let overlays = pieces_found
+                    .drain(..)
                     .map(|(piece, mesh)| {
                         commands
                             .spawn((
@@ -400,10 +414,10 @@ fn update_selection_glow(
                             ))
                             .id()
                     })
-                    .collect()
+                    .collect();
+                commands.entity(unit).try_insert(Glow { shade, overlays });
             }
-        };
-        commands.entity(unit).try_insert(Glow { shade, overlays });
+        }
     }
 }
 
@@ -507,6 +521,29 @@ mod tests {
         app.update();
         assert!(app.world().get::<Glow>(unit).is_none());
         assert!(app.world().get_entity(overlay).is_err());
+    }
+
+    /// Selecting more units than one frame's overlay budget covers
+    /// lights the rest over the next frames.
+    #[test]
+    fn a_big_selection_glows_over_a_few_frames() {
+        let mut app = app();
+        let units: Vec<Entity> = (0..GLOW_SPAWNS_PER_FRAME + 10)
+            .map(|_| spawn_unit(&mut app, 20000.0).0)
+            .collect();
+        for &unit in &units {
+            app.world_mut().entity_mut(unit).insert(Selected);
+        }
+        let glowing = |app: &App| {
+            units
+                .iter()
+                .filter(|&&u| app.world().get::<Glow>(u).is_some())
+                .count()
+        };
+        app.update();
+        assert_eq!(glowing(&app), GLOW_SPAWNS_PER_FRAME);
+        app.update();
+        assert_eq!(glowing(&app), units.len());
     }
 
     /// `SetUnitColor`'s ramp and `HilightUnit`'s alphas.
