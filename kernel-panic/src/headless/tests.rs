@@ -829,36 +829,38 @@ fn shared_defeat_4v4() {
 #[ignore = "boots the app; --ignored"]
 fn fixed_ambiguities() {
     let mut app = build_app(Executor::Multi);
-    let pairs: Vec<(String, String, Vec<String>)> =
-        app.world_mut()
-            .resource_scope(|world, mut schedules: Mut<Schedules>| {
-                let schedule = schedules.get_mut(FixedUpdate).unwrap();
-                schedule.initialize(world).unwrap();
-                let names: HashMap<_, String> = schedule
-                    .systems()
-                    .unwrap()
-                    .map(|(key, sys)| (key, sys.name().to_string()))
-                    .collect();
-                let name = |k| names.get(k).cloned().unwrap_or_default();
-                schedule
-                    .graph()
-                    .conflicting_systems()
-                    .iter()
-                    .map(|(a, b, c)| {
-                        let comps = c
-                            .iter()
-                            .map(|id| {
-                                world
-                                    .components()
-                                    .get_name(*id)
-                                    .map(|n| n.to_string())
-                                    .unwrap_or_default()
-                            })
-                            .collect();
-                        (name(a), name(b), comps)
-                    })
-                    .collect()
-            });
+    let pairs: Vec<(String, String, Vec<String>)> = app
+        .world_mut()
+        // Out of `Schedules` while initializing: building the
+        // schedule may insert `Schedules` itself, which a
+        // `resource_scope` over it refuses.
+        .schedule_scope(FixedUpdate, |world, schedule| {
+            schedule.initialize(world).unwrap();
+            let names: HashMap<_, String> = schedule
+                .systems()
+                .unwrap()
+                .map(|(key, sys)| (key, sys.name().to_string()))
+                .collect();
+            let name = |k| names.get(k).cloned().unwrap_or_default();
+            schedule
+                .graph()
+                .conflicting_systems()
+                .iter()
+                .map(|(a, b, c)| {
+                    let comps = c
+                        .iter()
+                        .map(|id| {
+                            world
+                                .components()
+                                .get_name(*id)
+                                .map(|n| n.to_string())
+                                .unwrap_or_default()
+                        })
+                        .collect();
+                    (name(a), name(b), comps)
+                })
+                .collect()
+        });
     let ours = pairs
         .iter()
         .filter(|(a, b, _)| a.starts_with("kernel_panic") && b.starts_with("kernel_panic"))
