@@ -79,12 +79,14 @@ jobs:
     # support chromium on ubuntu26.04-x64"). Back to latest once a
     # Playwright release lists 26.04.
     runs-on: ubuntu-24.04
-    # A green run takes 8-30 min. The test itself gives up after ~6 min
-    # of not meeting or not finishing, so only a hang with no error at
-    # all gets this far (net-experiments/m3-ci-flakes.md §2) — without
-    # it, such a job holds its runner for GitHub's 6 h default
-    # (run 40327279322 sat on the test step for over an hour).
-    timeout-minutes: 45
+    # A green run takes 8-30 min warm and 44 min on a cold cache (run
+    # 40327279322, the first on 24.04: 10 min of wasm-release and 14 min
+    # of test-profile compiling around a 32 s test). The test itself
+    # gives up after ~6 min of not meeting or not finishing, so only a
+    # hang with no error at all needs this (net-experiments/
+    # m3-ci-flakes.md §2) — and without it such a job would hold its
+    # runner for GitHub's 6 h default, as the wasm replay job's 30 says.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/linux-deps
