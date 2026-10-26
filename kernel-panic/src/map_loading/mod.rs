@@ -51,6 +51,7 @@ use spring_map::{
 
 // HexFarm Lua-composited towers/bridges (native and web: the data
 // round-trips through `.kpmap`).
+mod bc1;
 pub(crate) mod lua_compositing;
 mod match_scope;
 mod mipmap;
@@ -210,7 +211,9 @@ impl Plugin for MapLoadingPlugin {
                 .add_systems(
                     First,
                     (
-                        poll_map_load.run_if(|pending: Res<PendingWebMapLoad>| pending.0.is_some()),
+                        poll_map_load.run_if(|pending: Res<PendingWebMapLoad>| {
+                            !matches!(*pending, PendingWebMapLoad::Idle)
+                        }),
                         spawn_prepared_map,
                     )
                         .chain()
@@ -238,11 +241,22 @@ struct PendingMapLoad(Option<bevy::tasks::Task<Option<PreparedMap>>>);
 #[derive(Resource, Default)]
 struct ReadyMap(Option<PreparedMap>);
 
-/// Web: in-flight `.kpmap` fetch, requested by [`prepare_game_entry`]
-/// and consumed by [`poll_map_load`] when the payload lands.
+/// Web: the map load in flight, requested by [`prepare_game_entry`] and
+/// driven by [`poll_map_load`]: the `.kpmap` fetch, then its
+/// [`prepare_map`], polled once a frame (wasm has one thread, so the
+/// preparation's phases share it with the frames that draw the loading
+/// screen). Replacing it drops (cancels) the previous load.
 #[cfg(target_arch = "wasm32")]
 #[derive(Resource, Default)]
-struct PendingWebMapLoad(Option<Handle<BytesAsset>>);
+enum PendingWebMapLoad {
+    #[default]
+    Idle,
+    Fetching(Handle<BytesAsset>),
+    Preparing(std::sync::Mutex<WebMapPrep>),
+}
+
+#[cfg(target_arch = "wasm32")]
+type WebMapPrep = std::pin::Pin<Box<dyn Future<Output = Option<PreparedMap>> + Send>>;
 
 /// Web: map paths already handed to the asset server (in flight or
 /// loaded), so the prefetcher doesn't re-request every frame. Holds
@@ -361,9 +375,9 @@ fn prepare_game_entry(world: &mut World) {
             .unwrap_or_default()
             .to_string_lossy()
             .into_owned();
-        let inputs = PrepareInputs::gather(setup, world.resource::<UnitRegistry>(), map_name);
+        let inputs = PrepareInputs::gather(setup, world, map_name);
         let task = bevy::tasks::AsyncComputeTaskPool::get()
-            .spawn(async move { load_and_prepare(&path, inputs) });
+            .spawn(async move { load_and_prepare(&path, inputs).await });
         // Dropping the previous task cancels it.
         world.resource_mut::<PendingMapLoad>().0 = Some(task);
     }
@@ -374,7 +388,7 @@ fn prepare_game_entry(world: &mut World) {
         let handle: Handle<BytesAsset> = world
             .resource::<AssetServer>()
             .load(path.to_string_lossy().into_owned());
-        world.resource_mut::<PendingWebMapLoad>().0 = Some(handle);
+        *world.resource_mut::<PendingWebMapLoad>() = PendingWebMapLoad::Fetching(handle);
     }
 }
 
@@ -382,7 +396,10 @@ fn prepare_game_entry(world: &mut World) {
 /// on the compute pool; a failure is logged here and leaves the current
 /// world in place.
 #[cfg(not(target_arch = "wasm32"))]
-fn load_and_prepare(map_path: &std::path::Path, inputs: PrepareInputs) -> Option<PreparedMap> {
+async fn load_and_prepare(
+    map_path: &std::path::Path,
+    inputs: PrepareInputs,
+) -> Option<PreparedMap> {
     info!("Loading map: {}", inputs.map_name);
     let decode_start = bevy::platform::time::Instant::now();
     let bytes = match std::fs::read(map_path) {
@@ -403,7 +420,7 @@ fn load_and_prepare(map_path: &std::path::Path, inputs: PrepareInputs) -> Option
         "  decoded in {:.0}ms",
         decode_start.elapsed().as_secs_f64() * 1000.0
     );
-    let mut prepared = prepare_map(spring_map, inputs);
+    let mut prepared = prepare_map(spring_map, inputs).await;
     // The file's hash, as the lobby compares it (`lobby::read_map_hash`).
     prepared.map_hash = crate::net::compat::map_hash(&bytes);
     Some(prepared)
@@ -431,21 +448,33 @@ fn poll_map_load(world: &mut World) {
 }
 
 /// Web: poll the in-flight `.kpmap` fetch; once the bytes have landed,
-/// decode and prepare the map on the spot (wasm is single-threaded),
-/// then swap worlds. A failed fetch logs an error and clears the pending
-/// state so the menu can retry.
+/// decode and prepare the map one phase a frame (see
+/// [`PendingWebMapLoad`]), then swap worlds. A failed fetch logs an
+/// error and clears the pending state so the menu can retry.
 #[cfg(target_arch = "wasm32")]
 fn poll_map_load(world: &mut World) {
     use bevy::asset::LoadState;
 
-    let Some(handle) = world.resource::<PendingWebMapLoad>().0.clone() else {
-        return;
+    let handle = match &mut *world.resource_mut::<PendingWebMapLoad>() {
+        PendingWebMapLoad::Idle => return,
+        PendingWebMapLoad::Fetching(handle) => handle.clone(),
+        PendingWebMapLoad::Preparing(prep) => {
+            let prep = prep.get_mut().unwrap_or_else(|e| e.into_inner());
+            let Some(result) = bevy::tasks::futures::check_ready(prep) else {
+                return;
+            };
+            *world.resource_mut::<PendingWebMapLoad>() = PendingWebMapLoad::Idle;
+            if let Some(prepared) = result {
+                finish_map_load(world, prepared);
+            }
+            return;
+        }
     };
     match world.resource::<AssetServer>().load_state(&handle) {
         LoadState::Loaded => {}
         LoadState::Failed(error) => {
             error!("Map fetch failed: {error}");
-            world.resource_mut::<PendingWebMapLoad>().0 = None;
+            *world.resource_mut::<PendingWebMapLoad>() = PendingWebMapLoad::Idle;
             return;
         }
         _ => return, // still fetching / deps loading
@@ -454,27 +483,40 @@ fn poll_map_load(world: &mut World) {
         return;
     };
     let bytes = asset.0.clone();
-    world.resource_mut::<PendingWebMapLoad>().0 = None;
-
     let setup = world.resource::<GameSetup>().clone();
     let map_name = setup.map.clone();
     info!("Received {} ({} baked bytes)", map_name, bytes.len());
-    let decode_start = bevy::platform::time::Instant::now();
-    let spring_map = match spring_map::baked::read_baked_map(&bytes) {
-        Ok(m) => m,
-        Err(error) => {
-            error!("Failed to decode baked map {map_name}: {error}");
-            return;
-        }
-    };
-    info!(
-        "  decoded in {:.0}ms",
-        decode_start.elapsed().as_secs_f64() * 1000.0
-    );
-    let inputs = PrepareInputs::gather(setup, world.resource::<UnitRegistry>(), map_name);
-    let mut prepared = prepare_map(spring_map, inputs);
-    prepared.map_hash = crate::net::compat::map_hash(&bytes);
-    finish_map_load(world, prepared);
+    let inputs = PrepareInputs::gather(setup, world, map_name);
+    let prep: WebMapPrep = Box::pin(async move {
+        // The decode in a frame of its own, after the one that saw the
+        // bytes land.
+        next_phase().await;
+        let decode_start = bevy::platform::time::Instant::now();
+        let spring_map = match spring_map::baked::read_baked_map(&bytes) {
+            Ok(m) => m,
+            Err(error) => {
+                error!("Failed to decode baked map {}: {error}", inputs.map_name);
+                return None;
+            }
+        };
+        info!(
+            "  decoded in {:.0}ms",
+            decode_start.elapsed().as_secs_f64() * 1000.0
+        );
+        next_phase().await;
+        let mut prepared = prepare_map(spring_map, inputs).await;
+        prepared.map_hash = crate::net::compat::map_hash(&bytes);
+        Some(prepared)
+    });
+    *world.resource_mut::<PendingWebMapLoad>() =
+        PendingWebMapLoad::Preparing(std::sync::Mutex::new(prep));
+}
+
+/// A break between the phases of [`prepare_map`]: pending once. The
+/// web's per-frame poll returns there and draws a frame; the native
+/// pool task is rescheduled at once.
+async fn next_phase() {
+    bevy::tasks::futures_lite::future::yield_now().await;
 }
 
 /// The swap: the old world goes, the match-level state switches to the
@@ -590,14 +632,21 @@ struct PrepareInputs {
     /// `UnitRegistry::hexfarm_medians`: Hex Farm rolls its layout from
     /// the roster's median health / build time.
     hexfarm_medians: (f64, f64),
+    /// The GPU samples BC1: the ground texture is kept compressed
+    /// ([`bc1`]). Native only: the web prepares the map on its one
+    /// thread, where encoding an 8192² ground would hold the page for
+    /// seconds.
+    bc1: bool,
 }
 
 impl PrepareInputs {
-    fn gather(setup: GameSetup, registry: &UnitRegistry, map_name: String) -> Self {
+    fn gather(setup: GameSetup, world: &World, map_name: String) -> Self {
         use std::collections::BTreeSet;
 
         use crate::units::content::definitions::ALL_UNIT_KINDS;
         use crate::units::content::unit_registry::DEFAULT_MAX_SLOPE_DEGREES;
+
+        let registry = world.resource::<UnitRegistry>();
 
         // Exact caps, not rounded: a cap quantised *below* a unit's own
         // value made `NavGridSet::bucket` skip its grid and hand every
@@ -638,6 +687,14 @@ impl PrepareInputs {
                 .map(|(cap, h, c)| (f32::from_bits(cap), h, c))
                 .collect(),
             hexfarm_medians: registry.hexfarm_medians(),
+            bc1: cfg!(not(target_arch = "wasm32"))
+                && world
+                    .get_resource::<bevy::render::renderer::RenderDevice>()
+                    .is_some_and(|device| {
+                        device
+                            .features()
+                            .contains(bevy::render::settings::WgpuFeatures::TEXTURE_COMPRESSION_BC)
+                    }),
         }
     }
 }
@@ -677,7 +734,10 @@ struct PreparedMap {
 /// the Hex Farm roll, texture mip chain, heightmap, aircraft smooth
 /// mesh, terrain chunk meshes, nav grids and minimap layer. Shared by
 /// the native compute task and the web arrival path.
-fn prepare_map(spring_map: spring_map::SpringMap, inputs: PrepareInputs) -> PreparedMap {
+///
+/// Async only to break between its phases ([`next_phase`]): the web
+/// spreads them over frames.
+async fn prepare_map(spring_map: spring_map::SpringMap, inputs: PrepareInputs) -> PreparedMap {
     let t_prepare = bevy::platform::time::Instant::now();
     let spring_map::SpringMap {
         mut parsed,
@@ -748,6 +808,9 @@ fn prepare_map(spring_map: spring_map::SpringMap, inputs: PrepareInputs) -> Prep
         };
         (farm, lua_compositing::atlas_image(atlas))
     });
+    if hex_farm.is_some() {
+        next_phase().await;
+    }
     let spring_map::map_types::ParsedMap {
         header,
         heights,
@@ -777,7 +840,7 @@ fn prepare_map(spring_map: spring_map::SpringMap, inputs: PrepareInputs) -> Prep
     );
 
     let t_texture = bevy::platform::time::Instant::now();
-    let terrain_image = match ground_texture {
+    let mut terrain_image = match ground_texture {
         _ if void_ground => None,
         Some(ground) => Some(build_terrain_image(ground)),
         None => {
@@ -786,6 +849,7 @@ fn prepare_map(spring_map: spring_map::SpringMap, inputs: PrepareInputs) -> Prep
         }
     };
     let texture_ms = t_texture.elapsed().as_secs_f64() * 1000.0;
+    next_phase().await;
 
     // Check actual height variance, not header values (gadgets may have modified the terrain).
     let min_actual = heights.iter().cloned().fold(f32::INFINITY, f32::det_min);
@@ -816,6 +880,7 @@ fn prepare_map(spring_map: spring_map::SpringMap, inputs: PrepareInputs) -> Prep
     }
     let chunks = generate_terrain_chunks(heightmap.heights(), hm_w, hm_h);
     let terrain_ms = t_terrain.elapsed().as_secs_f64() * 1000.0;
+    next_phase().await;
 
     // One pathfinding grid per distinct unit `MaxSlope`. A cell's slope
     // is the same for every bucket, so it is computed once and
@@ -855,6 +920,7 @@ fn prepare_map(spring_map: spring_map::SpringMap, inputs: PrepareInputs) -> Prep
                 max_slope: cap,
                 speed_map,
             });
+            next_phase().await;
         }
         // The QTPFS layer of every mover class over the bare terrain
         // (structures come later, as changes), tesselated here off the
@@ -868,6 +934,7 @@ fn prepare_map(spring_map: spring_map::SpringMap, inputs: PrepareInputs) -> Prep
                 nav_set
                     .terrain_layers
                     .insert((bucket, xsizeh, crushes), layer);
+                next_phase().await;
             }
         }
     }
@@ -917,6 +984,15 @@ fn prepare_map(spring_map: spring_map::SpringMap, inputs: PrepareInputs) -> Prep
         }
         (None, None) => ui::minimap::downsample_terrain(None, 0, 0, mm_w, mm_h),
     };
+    next_phase().await;
+    // Compressed only now: the minimap above reads the RGBA base level.
+    let t_bc1 = bevy::platform::time::Instant::now();
+    if inputs.bc1
+        && let Some(image) = terrain_image.as_mut()
+    {
+        mipmap::compress_bc1(image);
+    }
+    let texture_ms = texture_ms + t_bc1.elapsed().as_secs_f64() * 1000.0;
 
     info!(
         "  prepared in {:.0}ms: texture {texture_ms:.0}ms, terrain {terrain_ms:.0}ms, {} nav buckets {nav_ms:.0}ms",

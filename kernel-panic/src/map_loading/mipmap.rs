@@ -99,6 +99,36 @@ pub(super) fn build_terrain_image(ground: GroundTexture) -> Image {
     image
 }
 
+/// Re-encode a terrain image built by [`build_terrain_image`] as BC1,
+/// its whole mip chain (an eighth of the upload and the VRAM; the
+/// original SMT ground is DXT1 too). Kept RGBA8 when the ground has
+/// transparency, or a side is not a whole number of 4×4 blocks.
+pub(super) fn compress_bc1(image: &mut Image) {
+    let desc = &image.texture_descriptor;
+    let (w, h, levels) = (
+        desc.size.width as usize,
+        desc.size.height as usize,
+        desc.mip_level_count,
+    );
+    let Some(rgba) = image.data.as_deref() else {
+        return;
+    };
+    if !w.is_multiple_of(4) || !h.is_multiple_of(4) || !super::bc1::opaque(rgba) {
+        return;
+    }
+    let t = bevy::platform::time::Instant::now();
+    let blocks = super::bc1::encode_chain(rgba, w, h, levels);
+    info!(
+        "  Texture: BC1, {} MB (from {} MB) in {:.0}ms",
+        blocks.len() >> 20,
+        rgba.len() >> 20,
+        t.elapsed().as_secs_f64() * 1000.0
+    );
+    image.data = Some(blocks);
+    image.texture_descriptor.format =
+        bevy::render::render_resource::TextureFormat::Bc1RgbaUnormSrgb;
+}
+
 /// Mip level 0 of a terrain image built by [`build_terrain_image`]:
 /// the base pixels and their size.
 pub(super) fn base_level(image: &Image) -> (&[u8], usize, usize) {
