@@ -18,6 +18,11 @@ mkdir -p "$out"
 logs=("$golden"/*.kpreplay)
 
 sw_vers || true
+# The host's chip: Rosetta's float handling is one implementation on
+# M1 (which predates ARM's FEAT_AFP) and the hardware's on later chips
+# (dougallj, "Why is Rosetta 2 fast?"), and the runner fleet may mix.
+sysctl -n machdep.cpu.brand_string hw.model hw.ncpu hw.memsize || true
+sysctl hw.optional.arm 2>/dev/null | grep -i "afp\|ebf16\|i8mm" || true
 echo "arch: $(arch)"; file "$bin"
 ls -la /Library/Apple/usr/libexec/oah/ 2>/dev/null || true
 

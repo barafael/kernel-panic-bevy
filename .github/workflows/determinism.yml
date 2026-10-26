@@ -147,6 +147,10 @@ jobs:
             run=()
           fi
           file "$bin" "$probe" 2>/dev/null || true
+          # Which chip the macOS runner is on: the Rosetta trail
+          # divergence may follow the host (M1's Rosetta handles float
+          # edge cases in software, later chips' in hardware).
+          [ "$RUNNER_OS" = macOS ] && sysctl -n machdep.cpu.brand_string hw.model || true
           "${run[@]}" "$bin" --replay "$GOLDEN_DIR"/*."$GOLDEN_EXT" --trail-dir trails
           "${run[@]}" "$probe" run "floatprobe/${{ matrix.platform }}.bin"
       # The query-order fuzz: the same replays with the ECS storage order
