@@ -17,6 +17,9 @@
 //!    placement. Shift+drag lays a row of buildings from the press point
 //!    to the release point (`GetBuildPositions`: Ctrl keeps the row
 //!    axis-aligned, Alt fills the rectangle, Alt+Ctrl its outline).
+//!    With Alt (a remake key) what is placed goes to the head of each
+//!    builder's queue, next after the order it is carrying out, as Alt
+//!    puts a factory's build first.
 //! 3. Once Shift is let go, the next click only disarms (`needShift`).
 //! 4. A Shift placement on a site the builder already has a build order
 //!    for cancels that order instead (`CCommandAI::GetCancelQueued`), so
@@ -34,6 +37,7 @@ use bevy::prelude::*;
 
 use crate::interaction::movement::{CommandQueue, QueuedCommand};
 use crate::interaction::selection::{Selected, cursor_ray};
+use crate::net::BuildQueue;
 use crate::rendering::camera::RtsCamera;
 use crate::sim::SQUARE_SIZE;
 use crate::terrain::geovent::{GeoventSmoker, VentClaim};
@@ -642,7 +646,7 @@ fn place_on_release(
 
     // (`needShift` — Shift let go after a Shift placement — already
     // disarmed in `disarm_without_builders`.)
-    let shift = mods(&keys).shift;
+    let m = mods(&keys);
     let sites = std::mem::take(&mut state.sites);
     if sites.len() == 1 && !sites[0].valid {
         // CMD_FAILED: nothing placed, the command stays armed.
@@ -655,7 +659,16 @@ fn place_on_release(
 
     // Every capable builder gets the sites; Shift-queueing against each
     // builder's orders (cancelling / refusing overlaps) and the vent
-    // claims happen when the command is applied (`net::apply`).
+    // claims happen when the command is applied (`net::apply`). Alt, a
+    // remake key, queues them next, ahead of what the builder has
+    // queued, as Alt does for a factory.
+    let queue = if m.alt {
+        BuildQueue::Front
+    } else if m.shift {
+        BuildQueue::Back
+    } else {
+        BuildQueue::Replace
+    };
     let builders = net.units(
         builders
             .iter()
@@ -666,10 +679,10 @@ fn place_on_release(
         builders,
         kind,
         sites: crate::net::PosList::quantize(valid),
-        queue: shift,
+        queue,
     });
     // FinishCommand.
-    if shift {
+    if m.shift {
         state.need_shift = true;
     } else {
         placement.kind = None;
@@ -1262,6 +1275,78 @@ mod tests {
             Some(UnitKind::Socket),
             "still armed while Shift is held"
         );
+    }
+
+    /// Alt queues ahead: with the first vent running and the second
+    /// Shift-queued, an Alt+Shift click on a third puts it before the
+    /// second.
+    #[test]
+    fn alt_click_queues_ahead_of_the_queue() {
+        let mut world = cursor_world();
+        let vents = [
+            MID + Vec3::new(0.0, 0.5, 0.0),
+            MID + Vec3::new(120.0, 0.5, 0.0),
+            MID + Vec3::new(-120.0, 0.5, 0.0),
+        ];
+        for pos in vents {
+            world.spawn(GeoventSmoker {
+                facing: 0,
+                pos,
+                emit_timer: 0.0,
+                rng: 0,
+            });
+        }
+        let builder = world
+            .spawn((
+                UnitType(UnitKind::Assembler),
+                Selected,
+                Transform::default(),
+            ))
+            .id();
+        world.resource_mut::<PlacementMode>().kind = Some(UnitKind::Socket);
+        world
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::ShiftLeft);
+        let frame = |world: &mut World| {
+            world.run_system_once(disarm_without_builders).unwrap();
+            world.run_system_once(plan_sites).unwrap();
+            world.run_system_once(place_on_release).unwrap();
+            crate::net::apply_now(world);
+            world.flush();
+        };
+        for (i, &vent) in vents.iter().enumerate() {
+            if i == 2 {
+                world
+                    .resource_mut::<ButtonInput<KeyCode>>()
+                    .press(KeyCode::AltLeft);
+            }
+            let mut q = world.query_filtered::<&mut GlobalTransform, With<RtsCamera>>();
+            *q.single_mut(&mut world).unwrap() = GlobalTransform::from(
+                Transform::from_xyz(vent.x, 100.0, vent.z + 100.0)
+                    .looking_at(Vec3::new(vent.x, 0.0, vent.z), Vec3::Y),
+            );
+            frame(&mut world);
+            world
+                .resource_mut::<ButtonInput<MouseButton>>()
+                .press(MouseButton::Left);
+            frame(&mut world);
+            let mut mouse = world.resource_mut::<ButtonInput<MouseButton>>();
+            mouse.clear();
+            mouse.release(MouseButton::Left);
+            frame(&mut world);
+            world.resource_mut::<ButtonInput<MouseButton>>().clear();
+            frame(&mut world);
+        }
+        assert_eq!(
+            world.get::<PendingBuild>(builder).map(|p| p.site.xz()),
+            Some(vents[0].xz()),
+            "the first site is still the running order"
+        );
+        let queued: Vec<Vec2> = world
+            .get::<CommandQueue>(builder)
+            .map(|q| q.commands.iter().map(|c| c.position().xz()).collect())
+            .unwrap_or_default();
+        assert_eq!(queued, [vents[2].xz(), vents[1].xz()]);
     }
 
     /// #8 regression: the release frame commits the row, and on that

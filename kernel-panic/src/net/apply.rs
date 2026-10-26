@@ -64,8 +64,8 @@ use bevy::prelude::*;
 use super::control::{MAX_SPEED_PERCENT, MIN_SPEED_PERCENT};
 use super::speed::SERVER_PLAYER;
 use super::{
-    CommandBus, DevCommand, FactoryOp, MatchControl, NetId, NetIdIndex, NetPos, Order, PointOrder,
-    SimCommand,
+    BuildQueue, CommandBus, DevCommand, FactoryOp, MatchControl, NetId, NetIdIndex, NetPos, Order,
+    PointOrder, SimCommand,
 };
 use crate::game_setup::ActiveMatch;
 use crate::interaction::movement::{CommandQueue, MoveTarget, Orders, QueuedCommand};
@@ -755,11 +755,17 @@ impl ApplyCtx<'_, '_> {
                     self.commands.entity(own.e).remove::<ForcedTarget>();
                 }
             }
-            SimCommand::SelfDestruct { .. } => {
+            SimCommand::SelfDestruct { on, .. } => {
                 for own in self.owned(player, ids) {
-                    let countdown =
-                        SelfDestructCountdown::ordered(own.kind, self.registry.as_deref());
-                    self.commands.entity(own.e).insert(countdown);
+                    let mut unit = self.commands.entity(own.e);
+                    if *on {
+                        unit.insert_if_new(SelfDestructCountdown::ordered(
+                            own.kind,
+                            self.registry.as_deref(),
+                        ));
+                    } else {
+                        unit.remove::<SelfDestructCountdown>();
+                    }
                 }
             }
             SimCommand::Deploy { .. } => {
@@ -1289,8 +1295,16 @@ impl ApplyCtx<'_, '_> {
     /// Building placement (`ui::hud::placement`'s committing click):
     /// every capable builder gets the sites; with Shift each site is a
     /// queued command that may cancel the builder's own orders on that
-    /// spot ([`queue_build`]). The vents taken are claimed.
-    fn build(&mut self, player: u8, ids: &[NetId], kind: UnitKind, sites: &[Vec3], queue: bool) {
+    /// spot ([`queue_build`]), with Alt the same at the head of its
+    /// queue. The vents taken are claimed.
+    fn build(
+        &mut self,
+        player: u8,
+        ids: &[NetId],
+        kind: UnitKind,
+        sites: &[Vec3],
+        queue: BuildQueue,
+    ) {
         let mut ordered: Vec<Vec3> = Vec::new();
         for Own {
             e, kind: builder, ..
@@ -1299,19 +1313,24 @@ impl ApplyCtx<'_, '_> {
             if !buildings_for(builder).contains(&kind) {
                 continue;
             }
-            if queue && self.orders.busy(e) {
+            if queue != BuildQueue::Replace && self.orders.busy(e) {
                 let (q, _, pending, constructing) = self.queues.get(e).unwrap_or_default();
                 let running = pending
                     .map(|p| (p.kind, p.site))
                     .or(constructing.map(|c| (c.kind, c.site)));
                 let mut active = running;
                 let mut queued = q.map(|q| q.commands.clone()).unwrap_or_default();
+                let mut slot = match queue {
+                    BuildQueue::Front => 0,
+                    _ => queued.len(),
+                };
                 for &site in sites {
-                    let outcome = queue_build(&mut active, &mut queued, kind, site, |k| {
-                        self.registry
-                            .as_ref()
-                            .map_or(Vec2::splat(32.0), |r| r.footprint_elmos(k))
-                    });
+                    let outcome =
+                        queue_build(&mut active, &mut queued, &mut slot, kind, site, |k| {
+                            self.registry
+                                .as_ref()
+                                .map_or(Vec2::splat(32.0), |r| r.footprint_elmos(k))
+                        });
                     if outcome == QueuedBuild::Queued {
                         ordered.push(site);
                     }
@@ -1657,7 +1676,7 @@ mod tests {
             builders: Units::of([a]),
             kind: UnitKind::Socket,
             sites: PosList::quantize([site]),
-            queue: false,
+            queue: BuildQueue::Replace,
         };
         send(&mut world, 0, vec![build(vent + Vec3::X * 40.0)]);
         assert!(world.get::<PendingBuild>(builder).is_none());

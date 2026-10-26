@@ -29,7 +29,7 @@ use bevy::prelude::*;
 use crate::sim::DetFloat;
 use crate::{
     interaction::movement::MoveTarget,
-    net::{CommandBus, FactoryOp, NetId, PosList, SimCommand, Units},
+    net::{BuildQueue, CommandBus, FactoryOp, NetId, PosList, SimCommand, Units},
     terrain::geovent::{GeoventSmoker, VentClaim},
     terrain::heightmap::Heightmap,
     units::{
@@ -268,7 +268,7 @@ pub fn showcase_director(
                 builders: Units::of([builder]),
                 kind,
                 sites: PosList::quantize([site]),
-                queue: false,
+                queue: BuildQueue::Replace,
             });
             d.build_index += 1;
             info!(

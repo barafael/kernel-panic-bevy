@@ -86,10 +86,10 @@ read the resulting state.
   than at max zoom-in.
 - **Zoom**: mouse wheel (up = zoom in, down = zoom out); zoom distance
   is clamped at minimum and maximum bounds.
-- **Orbit**: middle-mouse drag rotates yaw + pitch. Pitch is clamped
-  so the camera can't flip through the ground or look straight up.
-- **Yaw rotate hotkeys**: `Q` rotates left, `E` rotates right. Both
-  rotate as long as the key is held, independent of unit selection.
+- **Drag**: middle-mouse drag moves the map along with the cursor.
+- **Orbit**: Alt+middle-drag, or the mouse moved with `R` held, rotates
+  yaw + pitch. Pitch is clamped so the camera can't flip through the
+  ground or look straight up.
 
 ## 3. Selection & orders
 
@@ -131,8 +131,7 @@ read the resulting state.
   Attack), Move=M, Fight=F, Patrol=P, Guard=G, AutoHold=H (Worm and Security
   Hole, whose Worms inherit it), Enter=E (Packet), Clear=E
   (constructor), Undeploy=U (Exploit), Bombard=B (Bug; a remake key,
-  §15), `Ctrl+D` self-destruct with a
-  5-second countdown (cancelled by `Stop`), set target=T and
+  §15), `Ctrl+D` self-destruct (below), set target=T and
   unset target=X (remake extras: no panel button, as in KP), `,` / `.`
   previous / next panel page, and keypad 2/4/6/8 arm the selected
   constructor's minifac (Socket / Window / Port, `kp_hotkeys.lua`).
@@ -144,8 +143,21 @@ read the resulting state.
   (`CGuiHandler::SetActiveCommand`).
   Pressing an armed command's hotkey again disarms it; Escape or a
   right-click anywhere disarms whatever command is armed, and that
-  right-click issues no order. `Ctrl+A` selects every own living unit
-  (Spring's `select AllMap++_ClearSelection_SelectAll+`).
+  right-click issues no order.
+- `Ctrl+D` starts each selected unit's self-destruct countdown, its
+  FBI `SelfDestructCountdown` (1.5 s for mobile units, 5.5 s for
+  buildings); the seconds left, rounded up, show over every unit of the
+  player's side that counts down (Spring only logs them). Pressed again
+  with every selected unit counting, it calls them off (Spring's
+  toggle), as `Stop` does.
+- Selection keys: `Ctrl+A` every own living unit (Spring's `select
+  AllMap++_ClearSelection_SelectAll+`); `Ctrl+B` an idle builder — a
+  constructor without orders or a factory with nothing queued — with
+  the camera gliding to it, and the next one on each press (Spring's
+  default `Ctrl+b`); `Q` every own unit on screen of a type in the
+  selection (Shift+Q adds them); `Tab` the homebase, camera along (the
+  next one, for a player with several); `Ctrl+1`–`9` store the
+  selection as a group, `1`–`9` select it, Shift+digit adds it.
 - Resign from the Esc menu (asks once more). When a player leaves —
   resigns or loses its last factory — and an ally still plays, its units
   stay and every active ally sees a flashing TAKE button that hands them
@@ -512,6 +524,10 @@ modrules (QTPFS, `allowUnitCollisionOverlap=1`,
   release point, spaced by the footprint (Ctrl: axis-aligned; Alt:
   filled rectangle; Alt+Ctrl: its outline) — all queued. For datavent
   buildings every sample snaps to a vent of its own.
+- Alt (a remake key) puts what is placed at the head of the
+  constructor's queue, next after the order it is carrying out, as Alt
+  puts a factory's build first (§4). With Shift too it stays armed; an
+  Alt rectangle goes to the head as well.
 - A click on an invalid site places nothing and keeps the command
   armed. Right-click / Escape / deselecting the constructor cancels.
 - While constructing, the builder is pinned facing the build site —

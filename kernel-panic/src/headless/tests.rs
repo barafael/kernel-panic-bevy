@@ -1761,11 +1761,12 @@ fn match_statistics_follow_the_match() {
 }
 
 /// End to end: a constructor given a build, then two Shift-queued ones
-/// (three separate placements, as the player clicks them) walks to and
-/// builds all three, in order.
+/// and an Alt one (four separate placements, as the player clicks
+/// them) walks to and builds all four in queue order, the Alt one
+/// next after the building going up.
 #[test]
-fn shift_queued_builds_are_built_in_order() {
-    use crate::net::{CommandFrame, FactoryOp, NetId, PosList, SimCommand, Units};
+fn queued_builds_are_built_in_order() {
+    use crate::net::{BuildQueue, CommandFrame, FactoryOp, NetId, PosList, SimCommand, Units};
     use crate::terrain::geovent::GeoventSmoker;
     use crate::units::components::{TeamId, UnitType};
     use crate::units::content::definitions::UnitKind;
@@ -1817,7 +1818,7 @@ fn shift_queued_builds_are_built_in_order() {
     let builder = builder.expect("the Kernel builds an Assembler");
     let kind = buildings_for(UnitKind::Assembler)[0];
 
-    // A long build walk: the three vents nearest the middle of the map
+    // A long build walk: the four vents nearest the middle of the map
     // (half way to the enemy), well away from home.
     let middle = (home + enemy) * 0.5;
     let world = h.world_mut();
@@ -1830,9 +1831,9 @@ fn shift_queued_builds_are_built_in_order() {
         a.distance_squared(middle)
             .total_cmp(&b.distance_squared(middle))
     });
-    let sites: Vec<Vec3> = vents.into_iter().take(3).collect();
+    let sites: Vec<Vec3> = vents.into_iter().take(4).collect();
     assert!(sites.iter().all(|s| s.xz().distance(home.xz()) > 1000.0));
-    let order = |h: &mut SimHarness, site: Vec3, queue: bool| {
+    let order = |h: &mut SimHarness, site: Vec3, queue: BuildQueue| {
         let mut bus = h.world_mut().resource_mut::<CommandBus>();
         let tick = bus.tick;
         bus.deliver(CommandFrame {
@@ -1856,9 +1857,9 @@ fn shift_queued_builds_are_built_in_order() {
             .any(|id| *id == builder)
     };
     // The first build; the second queued on the walk there; the third
-    // once the first is going up.
-    order(&mut h, sites[0], false);
-    order(&mut h, sites[1], true);
+    // behind it and the fourth ahead of it once the first is going up.
+    order(&mut h, sites[0], BuildQueue::Replace);
+    order(&mut h, sites[1], BuildQueue::Back);
     for _ in 0..3000 {
         if building(&mut h) {
             break;
@@ -1866,7 +1867,8 @@ fn shift_queued_builds_are_built_in_order() {
         h.step();
     }
     assert!(building(&mut h), "the first site is reached");
-    order(&mut h, sites[2], true);
+    order(&mut h, sites[2], BuildQueue::Back);
+    order(&mut h, sites[3], BuildQueue::Front);
 
     // The order the sites get a building of `kind`.
     let mut started: Vec<usize> = Vec::new();
@@ -1890,7 +1892,7 @@ fn shift_queued_builds_are_built_in_order() {
     }
     assert_eq!(
         started,
-        vec![0, 1, 2],
-        "every queued site is built, in order"
+        vec![0, 3, 1, 2],
+        "every queued site is built, in queue order"
     );
 }

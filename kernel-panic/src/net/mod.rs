@@ -277,6 +277,18 @@ pub enum PointOrder {
     AttackMove,
 }
 
+/// Where a [`SimCommand::Build`] goes among each builder's orders.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BuildQueue {
+    /// Instead of them (a plain click).
+    Replace,
+    /// Behind them (Shift).
+    Back,
+    /// At the head of the queue: next after the order the builder is
+    /// carrying out (Alt, as a factory's front).
+    Front,
+}
+
 /// A factory build-option click (`CFactoryCAI::GiveCommandReal`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FactoryOp {
@@ -321,7 +333,7 @@ pub enum SimCommand {
         #[serde(with = "codec::kind_index")]
         kind: UnitKind,
         sites: PosList,
-        queue: bool,
+        queue: BuildQueue,
     },
     Factory {
         factories: Units,
@@ -345,8 +357,11 @@ pub enum SimCommand {
     UnsetTarget {
         units: Units,
     },
+    /// `Ctrl+D`: `on` starts each unit's countdown (one already running
+    /// keeps its time), off cancels it.
     SelfDestruct {
         units: Units,
+        on: bool,
     },
     /// Bug ↔ Exploit.
     Deploy {
@@ -434,7 +449,7 @@ macro_rules! units_of {
             | SetAutoHold { units, .. }
             | SetTarget { units, .. }
             | UnsetTarget { units }
-            | SelfDestruct { units }
+            | SelfDestruct { units, .. }
             | Deploy { units }
             | Enter { units }
             | Cast { units, .. } => Some(units),

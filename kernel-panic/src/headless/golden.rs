@@ -31,7 +31,8 @@ use super::replay::{self, MapInput, PlayOptions, Replay, ReplayError};
 #[cfg(not(target_arch = "wasm32"))]
 use super::{HashLog, SimHarness};
 use crate::net::{
-    BombardTarget, FactoryOp, NetId, NetLen, NetPos, Order, PointOrder, PosList, SimCommand, Units,
+    BombardTarget, BuildQueue, FactoryOp, NetId, NetLen, NetPos, Order, PointOrder, PosList,
+    SimCommand, Units,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use crate::net::{CommandBus, CommandFrame};
@@ -350,7 +351,7 @@ pub(crate) fn script_for(
                             builders: Units::of(builders.iter().copied()),
                             kind: options[0],
                             sites: PosList::quantize([vent]),
-                            queue: false,
+                            queue: BuildQueue::Replace,
                         });
                     }
                     if let Some(&second) = options.get(1) {
@@ -359,7 +360,7 @@ pub(crate) fn script_for(
                             builders: Units::of(builders.iter().copied()),
                             kind: second,
                             sites: PosList::quantize([a, a + side * 32.0]),
-                            queue: true,
+                            queue: BuildQueue::Back,
                         });
                     }
                 }
@@ -556,6 +557,7 @@ pub(crate) fn script_for(
                 if let Some(u) = mobiles.first() {
                     cmds.push(SimCommand::SelfDestruct {
                         units: Units::of([u.id]),
+                        on: true,
                     });
                 }
             }
@@ -569,7 +571,7 @@ pub(crate) fn script_for(
                         builders: Units::of(builders.iter().copied()),
                         kind: UnitKind::BadBlock,
                         sites: PosList::quantize([a, a - side * 32.0]),
-                        queue: false,
+                        queue: BuildQueue::Replace,
                     });
                 }
             }

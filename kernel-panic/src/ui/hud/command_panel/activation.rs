@@ -23,6 +23,7 @@ use bevy::prelude::*;
 use crate::interaction::ability::{Mode, OrderCursorModes};
 use crate::interaction::selection::Selected;
 use crate::net::{FactoryOp, Issue, SimCommand};
+use crate::units::combat::SelfDestructCountdown;
 use crate::units::components::UnitType;
 use crate::units::content::definitions::UnitKind;
 use crate::units::lifecycle::production::{Producer, factory_roster};
@@ -225,8 +226,18 @@ pub(super) fn disarm(modes: &mut OrderCursorModes, placement: &mut PlacementMode
     placement.kind = None;
 }
 
-type SelectedUnits<'w, 's> =
-    Query<'w, 's, (Entity, &'static UnitType, Has<Producer>, Has<AutoHold>), With<Selected>>;
+type SelectedUnits<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        &'static UnitType,
+        Has<Producer>,
+        Has<AutoHold>,
+        Has<SelfDestructCountdown>,
+    ),
+    With<Selected>,
+>;
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn apply_activations(
@@ -314,7 +325,7 @@ pub(super) fn apply_activations(
                 let factories = net.units(
                     units
                         .iter()
-                        .filter(|(_, ut, producer, _)| {
+                        .filter(|(_, ut, producer, ..)| {
                             *producer && factory_roster(ut.0).contains(&kind)
                         })
                         .map(|(e, ..)| e),
@@ -340,7 +351,7 @@ pub(super) fn apply_activations(
                     units
                         .iter()
                         .filter(
-                            |(_, _, producer, autohold)| {
+                            |(_, _, producer, autohold, _)| {
                                 if repeat { *producer } else { *autohold }
                             },
                         )
@@ -383,9 +394,12 @@ pub(super) fn apply_activations(
                 }
             }
             CmdId::SelfDestruct => {
-                // Each unit's own FBI `SelfDestructCountdown`.
+                // Each unit's own FBI `SelfDestructCountdown`; pressed
+                // again once every one counts down, it calls them off
+                // (Spring's `CMD_SELFD` toggles).
+                let on = !units.iter().all(|(.., counting)| counting);
                 let units = net.units(units.iter().map(|(e, ..)| e));
-                net.issue(SimCommand::SelfDestruct { units });
+                net.issue(SimCommand::SelfDestruct { units, on });
             }
             CmdId::PrevPage | CmdId::NextPage => {
                 let pages = panel.pages.len().max(1);
@@ -494,6 +508,33 @@ mod tests {
             world.get::<Producer>(kernel).unwrap().current_production(),
             Some(UnitKind::Pointer)
         );
+    }
+
+    /// `Ctrl+D` starts the selection's countdowns, a running one keeping
+    /// its time; pressed again with every one counting, it calls them
+    /// off.
+    #[test]
+    fn ctrl_d_starts_then_calls_off_self_destruct() {
+        use crate::units::combat::SelfDestructCountdown;
+        let mut world = world();
+        let fresh = world.spawn((UnitType(UnitKind::Bit), Selected)).id();
+        let counting = world
+            .spawn((
+                UnitType(UnitKind::Bit),
+                Selected,
+                SelfDestructCountdown { remaining: 0.7 },
+            ))
+            .id();
+        let fuse = |world: &World, e| world.get::<SelfDestructCountdown>(e).map(|c| c.remaining);
+        send(&mut world, msg(CmdId::SelfDestruct));
+        assert!(fuse(&world, fresh).is_some(), "the other one starts");
+        assert_eq!(
+            fuse(&world, counting),
+            Some(0.7),
+            "and this one keeps its time"
+        );
+        send(&mut world, msg(CmdId::SelfDestruct));
+        assert_eq!((fuse(&world, fresh), fuse(&world, counting)), (None, None));
     }
 
     /// The command a key runs for these units' panel.

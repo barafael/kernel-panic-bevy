@@ -289,7 +289,7 @@ pub(crate) fn footprints_overlap(a: Vec2, a_half: Vec2, b: Vec2, b_half: Vec2) -
 /// (`CCommandAI::GiveAllowedCommand`, see [`queue_build`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum QueuedBuild {
-    /// Appended to the queue.
+    /// Put into the queue.
     Queued,
     /// It landed on build orders the builder already has, which are
     /// cancelled instead (`CancelCommands`); `active` when the running
@@ -314,12 +314,16 @@ pub(crate) enum QueuedBuild {
 ///    pushes a `CMD_STOP` in front: `StopBuild`, then the next command).
 /// 2. `GetOverlapQueued`: a site that would partly overlap one of the
 ///    builder's build orders is refused.
-/// 3. Otherwise the order is appended.
+/// 3. Otherwise the order goes into the queue at `slot`, which then
+///    points past it: the queue's length appends; Alt (a remake key)
+///    starts at the head, so a row keeps its order there. Orders
+///    cancelled ahead of `slot` move it back.
 ///
 /// `footprint` gives a kind's footprint in elmos.
 pub(crate) fn queue_build(
     active: &mut Option<(UnitKind, Vec3)>,
     queue: &mut Vec<QueuedCommand>,
+    slot: &mut usize,
     kind: UnitKind,
     site: Vec3,
     footprint: impl Fn(UnitKind) -> Vec2,
@@ -340,7 +344,15 @@ pub(crate) fn queue_build(
     };
     let cancel_active = active.is_some_and(|(k, at)| cancels(k, at));
     let before = queue.len();
-    queue.retain(|c| !matches!(*c, QueuedCommand::BuildAt { kind: k, site: at } if cancels(k, at)));
+    let (mut index, mut ahead) = (0, 0);
+    queue.retain(|c| {
+        let cancelled =
+            matches!(*c, QueuedCommand::BuildAt { kind: k, site: at } if cancels(k, at));
+        ahead += usize::from(cancelled && index < *slot);
+        index += 1;
+        !cancelled
+    });
+    *slot -= ahead;
     if cancel_active || queue.len() != before {
         if cancel_active {
             *active = None;
@@ -365,7 +377,8 @@ pub(crate) fn queue_build(
     {
         return QueuedBuild::Refused;
     }
-    queue.push(QueuedCommand::BuildAt { kind, site });
+    queue.insert(*slot, QueuedCommand::BuildAt { kind, site });
+    *slot += 1;
     QueuedBuild::Queued
 }
 
@@ -1043,35 +1056,95 @@ mod tests {
             site: at(x),
         };
         let sites = |q: &[QueuedCommand]| q.iter().map(|c| c.position().x).collect::<Vec<_>>();
+        // Shift: behind everything.
+        let back = |active: &mut Option<(UnitKind, Vec3)>,
+                    queue: &mut Vec<QueuedCommand>,
+                    kind: UnitKind,
+                    x: f32| {
+            let mut slot = queue.len();
+            queue_build(active, queue, &mut slot, kind, at(x), fp)
+        };
 
         let mut active = Some((UnitKind::BadBlock, at(0.0)));
         let mut queue = vec![QueuedCommand::Move(at(500.0)), bad(100.0), bad(200.0)];
         // Within half a footprint of the queued site at 100, any kind.
         assert_eq!(
-            queue_build(&mut active, &mut queue, UnitKind::LogicBomb, at(110.0), fp),
+            back(&mut active, &mut queue, UnitKind::LogicBomb, 110.0),
             QueuedBuild::Cancelled { active: false }
         );
         assert_eq!(sites(&queue), [500.0, 200.0]);
         assert!(active.is_some());
         // Partly overlapping the site at 200: refused, nothing changes.
         assert_eq!(
-            queue_build(&mut active, &mut queue, UnitKind::BadBlock, at(225.0), fp),
+            back(&mut active, &mut queue, UnitKind::BadBlock, 225.0),
             QueuedBuild::Refused
         );
         assert_eq!(sites(&queue), [500.0, 200.0]);
         // Clear of everything: queued.
         assert_eq!(
-            queue_build(&mut active, &mut queue, UnitKind::BadBlock, at(300.0), fp),
+            back(&mut active, &mut queue, UnitKind::BadBlock, 300.0),
             QueuedBuild::Queued
         );
         assert_eq!(sites(&queue), [500.0, 200.0, 300.0]);
         // On the running order's site: it is cancelled too.
         assert_eq!(
-            queue_build(&mut active, &mut queue, UnitKind::BadBlock, at(0.0), fp),
+            back(&mut active, &mut queue, UnitKind::BadBlock, 0.0),
             QueuedBuild::Cancelled { active: true }
         );
         assert!(active.is_none());
         assert_eq!(sites(&queue), [500.0, 200.0, 300.0]);
+    }
+
+    /// Alt puts a placement at the head of the queue, a row in its
+    /// order; cancelling an order ahead of the slot moves it back.
+    #[test]
+    fn alt_queues_a_build_at_the_head() {
+        let fp = |_: UnitKind| Vec2::splat(32.0);
+        let at = |x: f32| Vec3::new(x, 0.0, 0.0);
+        let bad = |x: f32| QueuedCommand::BuildAt {
+            kind: UnitKind::BadBlock,
+            site: at(x),
+        };
+        let sites = |q: &[QueuedCommand]| q.iter().map(|c| c.position().x).collect::<Vec<_>>();
+        let mut active = Some((UnitKind::BadBlock, at(0.0)));
+        let mut queue = vec![QueuedCommand::Move(at(500.0)), bad(100.0)];
+        let mut slot = 0;
+        for x in [300.0, 400.0] {
+            let placed = queue_build(
+                &mut active,
+                &mut queue,
+                &mut slot,
+                UnitKind::BadBlock,
+                at(x),
+                fp,
+            );
+            assert_eq!(placed, QueuedBuild::Queued);
+        }
+        assert_eq!(sites(&queue), [300.0, 400.0, 500.0, 100.0]);
+        assert_eq!(slot, 2);
+        // On the queued site at 100, behind the slot: it stays put.
+        let placed = queue_build(
+            &mut active,
+            &mut queue,
+            &mut slot,
+            UnitKind::BadBlock,
+            at(105.0),
+            fp,
+        );
+        assert_eq!(placed, QueuedBuild::Cancelled { active: false });
+        assert_eq!((sites(&queue), slot), (vec![300.0, 400.0, 500.0], 2));
+        // On one of its own new sites, ahead of it: it moves back.
+        let placed = queue_build(
+            &mut active,
+            &mut queue,
+            &mut slot,
+            UnitKind::BadBlock,
+            at(295.0),
+            fp,
+        );
+        assert_eq!(placed, QueuedBuild::Cancelled { active: false });
+        assert_eq!((sites(&queue), slot), (vec![400.0, 500.0], 1));
+        assert!(active.is_some(), "the running order stays");
     }
 
     /// The builder stops and starts building once within its FBI

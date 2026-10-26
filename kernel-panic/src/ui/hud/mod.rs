@@ -15,6 +15,7 @@ mod net_overlay;
 pub(crate) mod placement;
 mod previews;
 mod replay_bar;
+mod self_destruct;
 mod take_button;
 mod tips;
 pub(crate) mod tooltip;
@@ -31,6 +32,7 @@ impl Plugin for HudPlugin {
             command_panel::CommandPanelPlugin,
             build_bar::BuildBarPlugin,
             buffer_line::BufferLinePlugin,
+            self_destruct::SelfDestructPlugin,
             tooltip::TooltipPlugin,
             placement::PlacementPlugin,
             geo_highlight::GeoHighlightPlugin,

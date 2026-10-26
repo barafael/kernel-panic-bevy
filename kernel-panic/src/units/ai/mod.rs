@@ -59,7 +59,7 @@ use crate::units::teams::Alliances;
 use crate::{
     game_setup::AiDifficulty,
     interaction::movement::{MovePath, OrderState},
-    net::{CommandBus, FactoryOp, NetId, NetPos, Order, PointOrder, SimCommand, Units},
+    net::{BuildQueue, CommandBus, FactoryOp, NetId, NetPos, Order, PointOrder, SimCommand, Units},
     rng::xorshift32,
     sim::{MatchSeed, SimTick},
     terrain::geovent::{GeoventSmoker, VentClaim},
@@ -423,7 +423,7 @@ fn run_late_game(
             .filter(|u| u.team == team && !suiciding.contains(u.entity))
             .map(|u| u.net),
     );
-    orders.issue_as(team, SimCommand::SelfDestruct { units });
+    orders.issue_as(team, SimCommand::SelfDestruct { units, on: true });
 }
 
 /// Seconds an AI waits before it takes a leaver's units while a human
@@ -736,7 +736,7 @@ fn run_constructors(
                 builders: Units::of([ctor.net]),
                 kind,
                 sites: crate::net::PosList::quantize([site]),
-                queue: false,
+                queue: BuildQueue::Replace,
             },
         );
         lack.buildings -= 1;

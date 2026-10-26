@@ -87,12 +87,16 @@ use super::state::Fnv;
 /// nav revision each tick (before, on its class's next request); auto-
 /// target rescans land on the unit's slow updates; a path is dirtied by
 /// each changed rectangle on its own, not by their bounding box.
+/// 20 (2026-10-26, keyboard shortcuts): `SelfDestruct` says start or
+/// call off (`Ctrl+D` again); a start leaves a running countdown its
+/// time. A `Build` goes in instead of the builder's orders, behind them
+/// or (Alt) at the head of its queue.
 ///
 /// [`SimCommand::Dropped`]: crate::net::SimCommand::Dropped
 /// [`SimCommand::Returned`]: crate::net::SimCommand::Returned
 /// [`SimCommand::InternalSpeed`]: crate::net::SimCommand::InternalSpeed
 /// [`MatchRules`]: crate::net::MatchRules
-pub const SIM_VERSION: u32 = 19;
+pub const SIM_VERSION: u32 = 20;
 
 /// The map-independent half of [`Compat`]: what a peer announces when
 /// it joins a room, before any map is chosen.

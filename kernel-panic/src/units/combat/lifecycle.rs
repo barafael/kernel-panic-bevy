@@ -81,7 +81,8 @@ const DEATH_ANIM_TIMEOUT: f32 = 2.0;
 /// via the `Ctrl+D` hotkey (FEATURES.md §3). When `remaining` hits zero
 /// [`tick_self_destruct`] drops the unit's HP to zero so the existing
 /// death/explode pipeline (incl. `ExplodeAs`) handles the blast.
-/// `Stop` removes the component to abort the countdown.
+/// `Stop`, or `Ctrl+D` again, removes the component to abort the
+/// countdown.
 #[derive(Component)]
 #[component(storage = "SparseSet")]
 pub struct SelfDestructCountdown {

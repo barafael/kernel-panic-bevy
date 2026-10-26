@@ -36,8 +36,8 @@ use super::apply::{MAX_BUILD_SITES, MAX_FACTORY_COUNT, Refusals};
 use super::control::{MAX_SPEED_PERCENT, MIN_SPEED_PERCENT};
 use super::speed::SERVER_PLAYER;
 use super::{
-    BombardTarget, CommandBus, CommandFrame, DevCommand, FactoryOp, IdList, MatchControl, NetId,
-    NetLen, NetPos, Order, PointOrder, PosList, SimCommand, Units,
+    BombardTarget, BuildQueue, CommandBus, CommandFrame, DevCommand, FactoryOp, IdList,
+    MatchControl, NetId, NetLen, NetPos, Order, PointOrder, PosList, SimCommand, Units,
 };
 use crate::headless::replay::{MapInput, MatchSetup, Seat, shuffle_storage, trail_text};
 use crate::headless::{HashLog, SimHarness};
@@ -316,7 +316,11 @@ fn chaos_command(d: &mut Dice, v: &View, team: u8, tick: u32, prev: bool) -> Sim
             kind: kind_for(d, &ids, buildings_for),
             builders: units,
             sites: PosList((0..1 + d.below(4)).map(|_| point(d)).collect()),
-            queue: d.chance(40),
+            queue: match d.below(5) {
+                0 | 1 => BuildQueue::Back,
+                2 => BuildQueue::Front,
+                _ => BuildQueue::Replace,
+            },
         },
         9 | 10 => SimCommand::Factory {
             kind: kind_for(d, &ids, factory_roster),
@@ -352,6 +356,7 @@ fn chaos_command(d: &mut Dice, v: &View, team: u8, tick: u32, prev: bool) -> Sim
                     .filter(|id| v.units.iter().any(|u| u.id == *id && !u.kind.is_factory()))
                     .take(1),
             ),
+            on: d.chance(80),
         },
         16 => SimCommand::Deploy { units },
         17 => SimCommand::Enter { units },
@@ -540,6 +545,7 @@ fn malformed(
             2 => (
                 SimCommand::SelfDestruct {
                     units: broken_list(d, &own),
+                    on: true,
                 },
                 true,
             ),
@@ -584,7 +590,7 @@ fn malformed(
                     builders: Units::of(own.iter().copied()),
                     kind: any_kind(d),
                     sites: PosList(vec![v.point(d, false); MAX_BUILD_SITES + 1]),
-                    queue: false,
+                    queue: BuildQueue::Replace,
                 },
                 true,
             ),
@@ -629,6 +635,7 @@ fn malformed(
             10 => (
                 SimCommand::SelfDestruct {
                     units: Units::of(v.foreign(player).iter().map(|u| u.id)),
+                    on: true,
                 },
                 false,
             ),

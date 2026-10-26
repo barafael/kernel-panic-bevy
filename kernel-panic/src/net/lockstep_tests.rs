@@ -695,7 +695,7 @@ fn frame_sizes() {
             sites: PosList::quantize(
                 (0..8).map(|i| Vec3::new(1600.0 + i as f32 * 32.0, 64.0, 900.0)),
             ),
-            queue: true,
+            queue: BuildQueue::Back,
         }],
     );
     let factory = frame(
