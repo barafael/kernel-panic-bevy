@@ -6,9 +6,14 @@ name: Rosetta probe
 # the runs with each other and with a Linux reference trail (the
 # `trail-linux-x86_64-gnu` artifact of a main run with the same sim
 # code), and dumps the unit state at the first diverging tick
-# (.github/scripts/rosetta-probe.sh). Dispatch only.
+# (.github/scripts/rosetta-probe.sh). Runs on every push of its own
+# branch (a workflow only on a branch cannot be dispatched: GitHub
+# registers workflows from the default branch) and by dispatch once it
+# is there.
 
 on:
+  push:
+    branches: [rosetta-probe]
   workflow_dispatch:
     inputs:
       reference_run:
@@ -26,6 +31,10 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
   GOLDEN_DIR: kernel-panic/tests/golden
+  # The push trigger has no inputs: main run 40338273605 (16c269d, the
+  # sim code this branch carries) and four replays.
+  REFERENCE_RUN: ${{ inputs.reference_run || '40338273605' }}
+  RUNS: ${{ inputs.runs || '4' }}
 
 jobs:
   # Named as determinism.yml's job so rust-cache finds its cache.
@@ -47,12 +56,12 @@ jobs:
       - name: Reference trails
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh run download "${{ inputs.reference_run }}" -R "${{ github.repository }}" -n trail-linux-x86_64-gnu -D reference
+        run: gh run download "$REFERENCE_RUN" -R "${{ github.repository }}" -n trail-linux-x86_64-gnu -D reference
       - name: Probe
         run: |
           bash .github/scripts/rosetta-probe.sh \
             target/x86_64-apple-darwin/release/kernel-panic "$GOLDEN_DIR" reference \
-            "${{ inputs.runs }}" probe
+            "$RUNS" probe
       - uses: actions/upload-artifact@v7
         if: ${{ !cancelled() }}
         with:
