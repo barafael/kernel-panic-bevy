@@ -520,8 +520,8 @@ pub(super) fn spawn_ceg(
         }
     }
     // The `[groundflash]` section (`oldskool_vbig`, `oldskool_big`,
-    // `mine`, `network_dissolve` ship the visible ones; a `ttl = 0`
-    // block is already `None`, §3.4).
+    // `mine`, `network_dissolve`, `network_spawn` ship the visible ones;
+    // a `ttl = 0` block is already `None`, §3.4).
     if let Some(gf) = &def.ground_flash
         && ceg_assets
             .ground_flash_materials(materials, images, model_cache)

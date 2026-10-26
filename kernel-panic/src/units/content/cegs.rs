@@ -12,9 +12,12 @@
 //! Names reach here from parsed data, always through [`CegKind::find`]:
 //! a weapon's `explosiongenerator=custom:…` and `cegTag=`, a unit FBI's
 //! `[SFXTypes]` table. Those files are data, so a name that is not a
-//! variant stays possible at runtime — `find` returns `None` and the
-//! caller falls back to the generic burst. Inside a CEG def there are no
-//! names left to resolve: a spawner's target is a variant.
+//! variant stays possible at runtime — `find` returns `None`, and what
+//! the caller does with that depends on the slot: an impact with no CEG
+//! gets the synthesised burst, a muzzle or trail with none draws
+//! nothing, as upstream does for a name with no generator behind it.
+//! Inside a CEG def there are no names left to resolve: a spawner's
+//! target is a variant.
 
 use super::ceg_def::ExplosionDef;
 use std::collections::HashMap;
@@ -214,7 +217,8 @@ impl CegKind {
     /// values all name a section that exists — so what reaches it is a
     /// name from a different vocabulary (a target category, a weapon
     /// name) or data that is not shipped. Callers treat `None` as "no
-    /// scripted CEG" and fall back to the generic burst. A CEG spawner's
+    /// scripted CEG": the impact path synthesises its burst, the muzzle
+    /// and trail paths draw nothing (`weapon_fx::spawn`). A CEG spawner's
     /// own target never comes through here: the source defs carry it as a
     /// variant.
     ///

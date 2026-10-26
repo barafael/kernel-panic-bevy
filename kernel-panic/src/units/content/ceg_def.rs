@@ -144,6 +144,10 @@ pub struct SpawnerProperties {
     pub damage: CegExpr,
     pub dir: CegVec3,
     pub pos: CegVec3,
+    /// Authored on every shipped spawner (as `0, 0, 0`) and applied by
+    /// nothing: upstream `CExpGenSpawner::Update` only counts `delay`
+    /// down and fires, it never moves `pos` by `speed`. Kept so the def
+    /// says what the TDF says; `spawn_delayed` does not read it either.
     pub speed: CegVec3,
     pub always_visible: bool,
 }

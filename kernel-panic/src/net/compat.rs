@@ -68,7 +68,10 @@ use super::state::Fnv;
 /// or an area (`ExecuteReclaim`), the Bug's Bombard (`bug_bombard.lua`)
 /// and a Packet's walk-and-enter — the Security Hole's AutoHold, which
 /// its Worms inherit, and a folded Pointer or Byte that chases and stops
-/// in range (only its shot waits for `Open`).
+/// in range (only its shot waits for `Open`); and, unversioned since
+/// `3a94ed2`, `CanAttack=0` disarms a unit whatever its `Weapon1` says
+/// (`UnitRegistry::weapon`), so the Trojan no longer auto-fires its
+/// `BuildLightning`.
 /// 16 (2026-10-25, the parity audit): a Worm's bite detonates its
 /// Wormsplash (the 800 splash and the infection); ground weapons shoot
 /// Flows in range (`NoChaseCategory` only stops chasing); a dispatched

@@ -17,8 +17,18 @@ non-shipped data). All line numbers are against `65c434d`.
 **Status:** the CEG step is implemented — `009a8c2` wrote the 50 defs
 as source (§2, §5.1–5.2), `ccb1207` ran the runtime off them and
 deleted the registry (§4, §5.3), `568a777` threaded the weapon's
-damage through (§3.1). The weapons and units steps named in the first
-paragraph have not been started.
+damage through (§3.1), `3a94ed2` acted on the branch review (shared
+`y`/`x` buffers per spawned instance, the `cegTag` trails' remaining
+`ttl` in the damage slot, `CanAttack`). Two deviations from the text
+below, both deliberate: `kernel-panic/assets/defs/explosions/` is
+**not** deleted (§4) — the 38 TDFs stay on disk, un-embedded, as the
+generator's input and the equivalence test's reference, because
+`upstream/` is a submodule CI does not check out and two of its file
+names differ in case; and the CEG texts simply left the compat hash
+(§4) rather than being replaced by a code hash, since CEG entities are
+fx-hash only. The weapons and units steps named in the first paragraph
+have not been started; `CegKind::find` and `resolve_texture(&str)`
+stay alive for them (§4).
 
 ## 0. What the enum step left half-done
 
@@ -59,7 +69,7 @@ only thing that does.
 | … `CBitmapMuzzleFlame` | 9 |
 | … `CExpGenSpawner` | 3 |
 | … `explspike` | 1 |
-| `[groundflash]` blocks | 12 (in 11 sections; 4 with `ttl > 0`) |
+| `[groundflash]` blocks | 12 (in 11 sections; 5 with `ttl > 0`) |
 | Distinct texture names | 18 (`square` 22, `circle` 14, `none` 7, `hline` 7, …) |
 | Property lines with expression ops | 17 |
 
@@ -287,11 +297,12 @@ upstream.
 
 ### 3.4 `[groundflash]` with `ttl = 0`
 
-Eight of the twelve. The engine draws nothing for them
+Seven of the twelve. The engine draws nothing for them
 (`flashAgeSpeed = 0`; `ceg.rs:615` already checks `gf.ttl > 0.0`).
 Write them as `ground_flash: None` with a one-line comment naming the
-upstream block, and drop the `ttl` check. The four live ones
-(`oldskool_vbig`, `oldskool_big`, `mine`, `network_dissolve`) stay
+upstream block, and drop the `ttl` check. The five live ones
+(`oldskool_vbig`, `oldskool_big`, `mine`, `network_dissolve`,
+`network_spawn`) stay
 `Some`.
 
 ### 3.5 `[none]`
