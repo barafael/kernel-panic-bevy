@@ -1051,7 +1051,9 @@ fn run_specials(
 
     // Pointer: upstream `DispatchArty` plants an NX Flag instead of a
     // plain attack when the target spot is crowded. One flag per tick.
-    if let Some((center, _)) = crowded_cluster(&s.enemy_pos, &s.friend_pos, CROWD_RADIUS)
+    // The crowd search only with a Pointer ready to plant it.
+    if ready(UnitKind::Pointer).next().is_some()
+        && let Some((center, _)) = crowded_cluster(&s.enemy_pos, &s.friend_pos, CROWD_RADIUS)
         && let Some(pointer) =
             ready(UnitKind::Pointer).find(|p| flat_dist_sq(p.pos, center) <= NX_RANGE * NX_RANGE)
     {
