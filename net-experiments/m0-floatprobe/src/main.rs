@@ -301,6 +301,192 @@ fn memcpy(iters: u64, n: usize) -> ExitCode {
     }
 }
 
+/// The game's state hash, byte for byte (`net::state::{Fnv, Records}`):
+/// FNV-1a over byte records sorted as byte strings, each after its
+/// length. Copied rather than shared so this probe builds alone.
+mod game_hash {
+    pub struct Fnv(u64);
+    impl Default for Fnv {
+        fn default() -> Self {
+            Self(0xcbf2_9ce4_8422_2325)
+        }
+    }
+    impl Fnv {
+        pub fn bytes(&mut self, b: &[u8]) {
+            for &x in b {
+                self.0 ^= x as u64;
+                self.0 = self.0.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        }
+        pub fn finish(self) -> u64 {
+            self.0
+        }
+    }
+    #[derive(Default)]
+    pub struct Records {
+        pub buf: Vec<u8>,
+        pub starts: Vec<usize>,
+    }
+    impl Records {
+        pub fn start(&mut self, head: impl AsRef<[u8]>) -> &mut Vec<u8> {
+            self.starts.push(self.buf.len());
+            self.buf.extend_from_slice(head.as_ref());
+            &mut self.buf
+        }
+        pub fn recs(&self) -> Vec<&[u8]> {
+            let ends = self.starts.iter().skip(1).copied().chain([self.buf.len()]);
+            self.starts
+                .iter()
+                .zip(ends)
+                .map(|(&a, b)| &self.buf[a..b])
+                .collect()
+        }
+        /// As the game: `sort_unstable` on `Vec<&[u8]>`, then FNV.
+        pub fn hash_sorted(&self) -> u64 {
+            let mut recs = self.recs();
+            recs.sort_unstable();
+            fnv(&recs)
+        }
+        /// The reference: a scalar byte-loop sort, then FNV.
+        pub fn hash_sorted_scalar(&self) -> u64 {
+            let mut recs = self.recs();
+            recs.sort_by(|a, b| {
+                for (x, y) in a.iter().zip(b.iter()) {
+                    if x != y {
+                        return x.cmp(y);
+                    }
+                }
+                a.len().cmp(&b.len())
+            });
+            fnv(&recs)
+        }
+    }
+    pub fn fnv(recs: &[&[u8]]) -> u64 {
+        let mut h = Fnv::default();
+        for r in recs {
+            h.bytes(&(r.len() as u32).to_le_bytes());
+            h.bytes(r);
+        }
+        h.finish()
+    }
+}
+
+/// The attempt at a minimal reproducer (`floatprobe stress <secs> <threads>`).
+/// Probe run 40371194065 job 3 hashed a tick whose every value equalled
+/// Linux's to a different number, so this does what the state hash does,
+/// continuously: builds ~570 unit-like records (id, kind, team, seven
+/// floats) and hashes them with the game's exact code, twice, and with
+/// a scalar reference, and reports any disagreement. With the churn a
+/// game process has around it: large allocations freed again (page
+/// faults), yields and short sleeps (context switches), on `n` threads.
+fn hash_stress(secs: u64, n: usize) -> ExitCode {
+    use game_hash::Records;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    let faults = AtomicU64::new(0);
+    let iterations = AtomicU64::new(0);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    std::thread::scope(|s| {
+        for t in 0..n {
+            let (faults, iterations) = (&faults, &iterations);
+            s.spawn(move || {
+                let mut x = 0x1234_5678_9abc_def0u64 ^ (t as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                let mut rng = move || {
+                    x ^= x << 13;
+                    x ^= x >> 7;
+                    x ^= x << 17;
+                    x
+                };
+                let mut it = 0u64;
+                let mut pos: Vec<[f32; 7]> = (0..600)
+                    .map(|_| {
+                        let r = rng();
+                        [
+                            (r as u32 % 4096) as f32,
+                            ((r >> 16) as u32 % 512) as f32,
+                            ((r >> 32) as u32 % 4096) as f32,
+                            0.0,
+                            std::f32::consts::FRAC_1_SQRT_2,
+                            0.0,
+                            std::f32::consts::FRAC_1_SQRT_2,
+                        ]
+                    })
+                    .collect();
+                while std::time::Instant::now() < deadline {
+                    it += 1;
+                    let r = rng();
+                    let count = 400 + (r % 200) as usize;
+                    // Units move a little every tick, as in a match.
+                    for p in pos.iter_mut().take(count) {
+                        let d = rng();
+                        p[0] += ((d as u32 % 200) as f32 - 100.0) * 0.01;
+                        p[2] += (((d >> 32) as u32 % 200) as f32 - 100.0) * 0.01;
+                        let a = ((d >> 8) as u32 % 65536) as f32 * (std::f32::consts::TAU / 65536.0);
+                        p[4] = bevy_math::ops::sin(a * 0.5);
+                        p[6] = bevy_math::ops::cos(a * 0.5);
+                    }
+                    let mut recs = Records::default();
+                    for (i, p) in pos.iter().enumerate().take(count) {
+                        let me = (i as u32 * 3 + 7).to_le_bytes();
+                        let rec = recs.start(me);
+                        rec.extend((i as u16 % 40).to_le_bytes());
+                        rec.push((i % 8) as u8);
+                        for v in p {
+                            rec.extend(v.to_le_bytes());
+                        }
+                    }
+                    let h1 = recs.hash_sorted();
+                    let h2 = recs.hash_sorted();
+                    let h3 = recs.hash_sorted_scalar();
+                    if h1 != h2 || h1 != h3 {
+                        faults.fetch_add(1, Ordering::Relaxed);
+                        println!(
+                            "FAULT on thread {t} iteration {it}: game hash {h1:016x}, again {h2:016x}, scalar {h3:016x} ({count} records)"
+                        );
+                    }
+                    // The churn.
+                    if it.is_multiple_of(64) {
+                        let big = 65536 + (rng() as usize % (8 << 20));
+                        let mut v: Vec<u8> = Vec::with_capacity(big);
+                        v.resize(big, (it & 0xff) as u8);
+                        std::hint::black_box(&v);
+                    }
+                    if it.is_multiple_of(16) {
+                        std::thread::yield_now();
+                    }
+                    if it.is_multiple_of(256) {
+                        std::thread::sleep(std::time::Duration::from_micros(100));
+                    }
+                }
+                iterations.fetch_add(it, Ordering::Relaxed);
+            });
+        }
+        // A progress line a minute, so a job log shows it is alive.
+        let mut elapsed = 0;
+        while std::time::Instant::now() < deadline {
+            std::thread::sleep(
+                std::time::Duration::from_secs(60).min(deadline - std::time::Instant::now()),
+            );
+            elapsed += 1;
+            println!(
+                "{elapsed} min, {} faults so far",
+                faults.load(Ordering::Relaxed)
+            );
+        }
+    });
+    let (f, i) = (
+        faults.load(Ordering::Relaxed),
+        iterations.load(Ordering::Relaxed),
+    );
+    println!("{secs} s on {n} threads: {i} hashes, {f} faults");
+    if f > 0 {
+        println!("FAIL: the state hash disagreed with itself or the scalar reference");
+        ExitCode::FAILURE
+    } else {
+        println!("OK: every hash agreed");
+        ExitCode::SUCCESS
+    }
+}
+
 fn threads(n: usize) -> ExitCode {
     let (main_line, main_bits) = thread_report("main");
     println!("{main_line}");
@@ -374,6 +560,10 @@ fn main() -> ExitCode {
             args.get(1)
                 .and_then(|n| n.parse().ok())
                 .unwrap_or(20_000_000),
+        ),
+        Some("stress") => hash_stress(
+            args.get(1).and_then(|n| n.parse().ok()).unwrap_or(60),
+            args.get(2).and_then(|n| n.parse().ok()).unwrap_or(3),
         ),
         Some("memcpy") => memcpy(
             args.get(1).and_then(|n| n.parse().ok()).unwrap_or(2_000),

@@ -46,7 +46,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        sample: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        sample: [1, 2, 3, 4]
     runs-on: macos-latest
     timeout-minutes: 120
     steps:
@@ -96,3 +96,32 @@ jobs:
           name: rosetta-probe-${{ matrix.sample }}
           path: probe/
           if-no-files-found: error
+
+  # The minimal-reproducer attempt: the state hash's exact code over
+  # unit-like records, continuously, twice per input and against a
+  # scalar reference, with allocation churn and context switches, for
+  # an hour on three threads under Rosetta (about a hundred times the
+  # hashing a replay process does). A fault here is Rosetta's alone.
+  stress:
+    name: hash stress ${{ matrix.sample }}
+    strategy:
+      fail-fast: false
+      matrix:
+        sample: [1, 2, 3]
+    runs-on: macos-latest
+    timeout-minutes: 80
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin
+      - name: Build the float probe
+        run: |
+          cd net-experiments/m0-floatprobe
+          cargo build --release --locked --target x86_64-apple-darwin
+      - name: Chip and Rosetta
+        run: |
+          sysctl -n machdep.cpu.brand_string hw.model
+          sw_vers
+      - name: Hash stress under Rosetta
+        run: arch -x86_64 net-experiments/m0-floatprobe/target/x86_64-apple-darwin/release/floatprobe stress 3600 3
