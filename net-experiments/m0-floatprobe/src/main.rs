@@ -184,6 +184,123 @@ fn memcmp(iters: u64) -> ExitCode {
     }
 }
 
+/// The byte at `i` of a reference stream: a cheap per-byte formula, so
+/// a copy is verified against arithmetic, never against another copy.
+fn stream(seed: u64, i: usize) -> u8 {
+    ((i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ seed).rotate_right(29) as u8
+}
+
+/// Large copies against the per-byte formula (`floatprobe memcpy`):
+/// `copy_from_slice` (memcpy) and `copy_within` (memmove) of up to
+/// 256 KiB at random offsets, and `Vec::push` growth (every realloc is
+/// a memcpy of the whole buffer). `memcmp` found byte comparison exact
+/// under Rosetta; a corrupted byte in a copy would explain a hash that
+/// differs over identical values (its scratch buffer grows by realloc)
+/// and, in a sim buffer, a position a hair off. On `n` threads at
+/// once, as the game's task pools copy concurrently.
+fn memcpy(iters: u64, n: usize) -> ExitCode {
+    let worker = |t: usize| -> (u64, u64, u64, u64, Vec<String>) {
+        let seed = 0xA5A5_0000 + t as u64;
+        let mut s = seed | 1;
+        let mut rng = move || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            s
+        };
+        const MAX: usize = 256 * 1024;
+        let src: Vec<u8> = (0..MAX + 128).map(|i| stream(seed, i)).collect();
+        let mut dst = vec![0u8; MAX + 128];
+        let (mut bad_copy, mut bad_move, mut bad_push, mut copied) = (0u64, 0u64, 0u64, 0u64);
+        let mut notes = Vec::new();
+        for it in 0..iters {
+            let r = rng();
+            // Lengths spread over the sizes a Vec passes through.
+            let len = match r % 4 {
+                0 => (r >> 8) as usize % 256,
+                1 => (r >> 8) as usize % 4096,
+                2 => (r >> 8) as usize % 65536,
+                _ => (r >> 8) as usize % MAX,
+            };
+            let os = ((r >> 32) % 64) as usize;
+            let od = ((r >> 40) % 64) as usize;
+            dst[od..od + len].copy_from_slice(&src[os..os + len]);
+            copied += len as u64;
+            if let Some(i) = (0..len).find(|&i| dst[od + i] != stream(seed, os + i)) {
+                bad_copy += 1;
+                if notes.len() < 8 {
+                    notes.push(format!(
+                        "thread {t} iter {it}: memcpy of {len} bytes from offset {os} to {od}: byte {i} is {:#04x}, expected {:#04x}",
+                        dst[od + i],
+                        stream(seed, os + i)
+                    ));
+                }
+            }
+            // memmove within one buffer, overlapping when the offsets
+            // are closer than the length.
+            let to = ((r >> 48) % 128) as usize;
+            dst[od..od + len].copy_from_slice(&src[os..os + len]);
+            dst.copy_within(od..od + len, to);
+            copied += len as u64;
+            if let Some(i) = (0..len).find(|&i| dst[to + i] != stream(seed, os + i)) {
+                bad_move += 1;
+                if notes.len() < 8 {
+                    notes.push(format!(
+                        "thread {t} iter {it}: memmove of {len} bytes from {od} to {to}: byte {i} is {:#04x}, expected {:#04x}",
+                        dst[to + i],
+                        stream(seed, os + i)
+                    ));
+                }
+            }
+            // Vec growth: pushes through every doubling up to `len`.
+            let mut v: Vec<u8> = Vec::with_capacity(8);
+            for i in 0..len {
+                v.push(stream(seed, os + i));
+            }
+            copied += len as u64;
+            if let Some(i) = (0..len).find(|&i| v[i] != stream(seed, os + i)) {
+                bad_push += 1;
+                if notes.len() < 8 {
+                    notes.push(format!(
+                        "thread {t} iter {it}: Vec of {len} pushed bytes: byte {i} is {:#04x}, expected {:#04x}",
+                        v[i],
+                        stream(seed, os + i)
+                    ));
+                }
+            }
+        }
+        (bad_copy, bad_move, bad_push, copied, notes)
+    };
+    let results: Vec<_> = std::thread::scope(|s| {
+        let handles: Vec<_> = (0..n).map(|t| s.spawn(move || worker(t))).collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("thread"))
+            .collect()
+    });
+    let (mut bad_copy, mut bad_move, mut bad_push, mut copied) = (0, 0, 0, 0);
+    for (c, m, p, bytes, notes) in &results {
+        bad_copy += c;
+        bad_move += m;
+        bad_push += p;
+        copied += bytes;
+        for note in notes {
+            println!("{note}");
+        }
+    }
+    println!(
+        "{iters} iterations on {n} threads, {} MiB copied: {bad_copy} bad memcpy, {bad_move} bad memmove, {bad_push} bad Vec growth",
+        copied >> 20
+    );
+    if bad_copy + bad_move + bad_push > 0 {
+        println!("FAIL: a copy lost or changed bytes");
+        ExitCode::FAILURE
+    } else {
+        println!("OK: every copy intact");
+        ExitCode::SUCCESS
+    }
+}
+
 fn threads(n: usize) -> ExitCode {
     let (main_line, main_bits) = thread_report("main");
     println!("{main_line}");
@@ -257,6 +374,10 @@ fn main() -> ExitCode {
             args.get(1)
                 .and_then(|n| n.parse().ok())
                 .unwrap_or(20_000_000),
+        ),
+        Some("memcpy") => memcpy(
+            args.get(1).and_then(|n| n.parse().ok()).unwrap_or(2_000),
+            args.get(2).and_then(|n| n.parse().ok()).unwrap_or(4),
         ),
         _ => {
             eprintln!(
