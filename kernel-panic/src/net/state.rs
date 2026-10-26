@@ -188,6 +188,42 @@ fn category_ids(world: &World) -> Vec<(ComponentId, &'static str, usize)> {
     out
 }
 
+/// Byte records, one after another in one buffer: a hash's thousands of
+/// records without an allocation each.
+#[derive(Default)]
+struct Records {
+    buf: Vec<u8>,
+    /// Where each record begins; it ends where the next does.
+    starts: Vec<usize>,
+}
+
+impl Records {
+    /// Begin a record with `head`; the rest goes onto the buffer.
+    fn start(&mut self, head: impl AsRef<[u8]>) -> &mut Vec<u8> {
+        self.starts.push(self.buf.len());
+        self.buf.extend_from_slice(head.as_ref());
+        &mut self.buf
+    }
+
+    /// The records in byte order, each hashed after its length.
+    fn hash_sorted(&self) -> u64 {
+        let ends = self.starts.iter().skip(1).copied().chain([self.buf.len()]);
+        let mut recs: Vec<&[u8]> = self
+            .starts
+            .iter()
+            .zip(ends)
+            .map(|(&a, b)| &self.buf[a..b])
+            .collect();
+        recs.sort_unstable();
+        let mut h = Fnv::default();
+        for r in recs {
+            h.bytes(&(r.len() as u32).to_le_bytes());
+            h.bytes(r);
+        }
+        h.finish()
+    }
+}
+
 /// [`category_ids`], kept until a component type is registered: the
 /// name scan is most of a hash's cost otherwise (`m1-runtime.md` §5).
 #[derive(Resource)]
@@ -236,9 +272,9 @@ pub fn capture(world: &mut World) -> Capture {
     // a live unit).
     let id_of: HashMap<Entity, NetId> = q.iter(world).map(|((e, id, ..), ..)| (e, *id)).collect();
     let reference = |e: Entity| id_of.get(&e).map_or(u32::MAX, |id| id.0).to_le_bytes();
-    let mut pos_recs: Vec<Vec<u8>> = Vec::new();
-    let mut hp_recs: Vec<Vec<u8>> = Vec::new();
-    let mut order_recs: Vec<Vec<u8>> = Vec::new();
+    let mut pos_recs = Records::default();
+    let mut hp_recs = Records::default();
+    let mut order_recs = Records::default();
     let mut bits = Bits::default();
     for (
         (_, id, ut, team, pose),
@@ -266,25 +302,23 @@ pub fn capture(world: &mut World) -> Capture {
         // in `NetId` order, and a unit that spawned under another id
         // (a different spawn order) changes the hash.
         let me = id.0.to_le_bytes();
-        let mut p = me.to_vec();
+        let p = pos_recs.start(me);
         p.extend((ut.0 as u16).to_le_bytes());
         p.push(team.0);
         p.extend(bits.vec3(tf.translation));
         for c in tf.rotation.to_array() {
             p.extend(bits.f32(c));
         }
-        pos_recs.push(p);
 
-        let mut h = me.to_vec();
+        let h = hp_recs.start(me);
         h.extend(bits.f32(hp));
         h.extend(bits.f32(max));
         h.push(flags);
         if let Some(em) = emerging {
             h.extend(bits.f32(em.remaining));
         }
-        hp_recs.push(h);
 
-        let mut o = me.to_vec();
+        let o = order_recs.start(me);
         if let Some(mt) = mt {
             o.push(1);
             o.extend(bits.vec3(mt.0));
@@ -352,7 +386,6 @@ pub fn capture(world: &mut World) -> Capture {
             o.push(12);
             o.extend(reference(e.target));
         }
-        order_recs.push(o);
     }
 
     // --- map features ----------------------------------------------------
@@ -361,42 +394,30 @@ pub fn capture(world: &mut World) -> Capture {
     let mut fq = world.query::<(&NetId, &Feature, &Transform, &Health)>();
     for (id, feature, tf, health) in fq.iter(world) {
         let me = id.0.to_le_bytes();
-        let mut p = me.to_vec();
+        let p = pos_recs.start(me);
         p.extend(u16::MAX.to_le_bytes());
         p.extend(feature.def.name.as_bytes());
         p.extend(bits.vec3(tf.translation));
-        pos_recs.push(p);
-        let mut h = me.to_vec();
-        h.extend(bits.f32(health.current));
-        hp_recs.push(h);
+        hp_recs.start(me).extend(bits.f32(health.current));
     }
 
     // --- projectiles -----------------------------------------------------
     let projectiles = projectile_entities.len();
-    let mut proj_recs: Vec<Vec<u8>> = Vec::new();
+    let mut proj_recs = Records::default();
     for e in projectile_entities {
         let pos = world
             .get::<SimPose>(e)
             .map(|p| p.sim().translation)
             .or_else(|| world.get::<Transform>(e).map(|t| t.translation))
             .unwrap_or_default();
-        proj_recs.push(bits.vec3(pos).to_vec());
+        proj_recs.start(bits.vec3(pos));
     }
 
-    let hash_sorted = |mut recs: Vec<Vec<u8>>| {
-        recs.sort_unstable();
-        let mut h = Fnv::default();
-        for r in &recs {
-            h.bytes(&(r.len() as u32).to_le_bytes());
-            h.bytes(r);
-        }
-        h.finish()
-    };
     let part_hashes = [
-        hash_sorted(pos_recs),
-        hash_sorted(hp_recs),
-        hash_sorted(order_recs),
-        hash_sorted(proj_recs),
+        pos_recs.hash_sorted(),
+        hp_recs.hash_sorted(),
+        order_recs.hash_sorted(),
+        proj_recs.hash_sorted(),
     ];
     let mut sim = Fnv::default();
     for p in part_hashes {
