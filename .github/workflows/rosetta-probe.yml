@@ -1,0 +1,61 @@
+name: Rosetta probe
+
+# Diagnostic for the sporadic `macos-x86_64-rosetta diverges from
+# linux-x86_64-gnu` in determinism.yml (since 2026-10-21): replays the
+# golden logs under Rosetta 2 several times on one runner, compares
+# the runs with each other and with a Linux reference trail (the
+# `trail-linux-x86_64-gnu` artifact of a main run with the same sim
+# code), and dumps the unit state at the first diverging tick
+# (.github/scripts/rosetta-probe.sh). Dispatch only.
+
+on:
+  workflow_dispatch:
+    inputs:
+      reference_run:
+        description: "Run id whose trail-linux-x86_64-gnu artifact is the reference"
+        required: true
+      runs:
+        description: "Replays of every log"
+        default: "4"
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  GOLDEN_DIR: kernel-panic/tests/golden
+
+jobs:
+  # Named as determinism.yml's job so rust-cache finds its cache.
+  native:
+    name: rosetta probe
+    runs-on: macos-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: replay-x86_64-apple-darwin
+          save-if: false
+      - name: Build the replay binary
+        run: cargo build --release --locked -p kernel-panic --features replay --target x86_64-apple-darwin
+      - name: Reference trails
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download "${{ inputs.reference_run }}" -R "${{ github.repository }}" -n trail-linux-x86_64-gnu -D reference
+      - name: Probe
+        run: |
+          bash .github/scripts/rosetta-probe.sh \
+            target/x86_64-apple-darwin/release/kernel-panic "$GOLDEN_DIR" reference \
+            "${{ inputs.runs }}" probe
+      - uses: actions/upload-artifact@v7
+        if: ${{ !cancelled() }}
+        with:
+          name: rosetta-probe
+          path: probe/
+          if-no-files-found: error
