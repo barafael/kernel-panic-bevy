@@ -299,6 +299,35 @@ impl Heightmap {
         None
     }
 
+    /// Where `ray` first meets the terrain inside the map, if it does:
+    /// [`Self::ground_hit`] over the stretch of the ray above the map's
+    /// footprint. The cursor's ground point without a mesh ray-cast
+    /// over every terrain chunk; off the map, as off the meshes, none.
+    pub fn ray_hit(&self, ray: Ray3d) -> Option<Vec3> {
+        let (w, d) = self.world_size();
+        let (mut t0, mut t1) = (0.0f32, f32::INFINITY);
+        for (o, dir, size) in [
+            (ray.origin.x, ray.direction.x, w),
+            (ray.origin.z, ray.direction.z, d),
+        ] {
+            if dir == 0.0 {
+                if !(0.0..=size).contains(&o) {
+                    return None;
+                }
+                continue;
+            }
+            let (a, b) = ((0.0 - o) / dir, (size - o) / dir);
+            t0 = t0.det_max(a.det_min(b));
+            t1 = t1.det_min(a.det_max(b));
+        }
+        if !(t0 <= t1 && t1.is_finite()) {
+            return None;
+        }
+        let hit = self.ground_hit(ray.get_point(t0), ray.get_point(t1))?;
+        // `sample` clamps to the edge: a hit just past it is the edge's.
+        (hit.x <= w && hit.z <= d && hit.x >= 0.0 && hit.z >= 0.0).then_some(hit)
+    }
+
     /// Does a straight line from `from` to `to` clear the terrain?
     ///
     /// `margin` is added to each sampled terrain height — callers pass a
@@ -440,6 +469,38 @@ mod tests {
         // Height 30 → −10 over 80 elmos: crosses 10 at x = 48.
         assert!((hit.x - 48.0).abs() < 2.0, "{hit}");
         assert!((hit.y - 10.0).abs() < 1.0, "{hit}");
+    }
+
+    /// A ray from outside the map's footprint is followed over it, and
+    /// one that only meets the ground beyond the edge hits nothing.
+    #[test]
+    fn ray_hit_stays_on_the_map() {
+        let hm = flat(10.0, 17, 17);
+        let down = |from: Vec3, to: Vec3| Ray3d::new(from, Dir3::new(to - from).unwrap());
+        // From beyond the west edge, down onto the middle of the map.
+        let hit = hm
+            .ray_hit(down(
+                Vec3::new(-200.0, 210.0, 64.0),
+                Vec3::new(64.0, 10.0, 64.0),
+            ))
+            .expect("meets the map");
+        assert!(hit.distance(Vec3::new(64.0, 10.0, 64.0)) < 0.01, "{hit}");
+        // Straight down onto ground past the east edge.
+        assert!(
+            hm.ray_hit(down(
+                Vec3::new(200.0, 100.0, 64.0),
+                Vec3::new(200.0, 0.0, 64.0)
+            ))
+            .is_none()
+        );
+        // Over the map but aimed off it, above the ground all the way.
+        assert!(
+            hm.ray_hit(down(
+                Vec3::new(64.0, 100.0, 64.0),
+                Vec3::new(400.0, 90.0, 64.0)
+            ))
+            .is_none()
+        );
     }
 
     /// A one-vertex-wide ridge (a 16-elmo wall) across a 1000-elmo shot:

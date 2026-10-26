@@ -23,7 +23,7 @@
 //! of Mainframe and Rock-Paper-Scissors modes, the Touhou side and the
 //! old Hacker units, none of which the remake has.
 
-use bevy::audio::{AudioPlayer, AudioSource, PlaybackSettings, Volume};
+use bevy::audio::{AudioPlayer, PlaybackSettings, Volume};
 use bevy::ecs::message::Messages;
 use bevy::input::InputSystems;
 use bevy::input::mouse::MouseWheel;
@@ -34,6 +34,7 @@ use bevy::prelude::*;
 use bevy::text::{FontSize, LineHeight};
 use bevy::window::PrimaryWindow;
 
+use crate::audio::Sfx;
 use crate::game_setup::{AppState, GameSetup};
 use crate::interaction::selection::Selected;
 use crate::map_loading::MatchScopeAppExt;
@@ -764,23 +765,24 @@ struct TipDispenser {
     font_size: Option<f32>,
 }
 
-/// The tip voice files, loaded when the app plays audio.
+/// The tip voice files, when the app plays audio. A line loads when it
+/// is picked, as an [`Sfx`]: decoded in an asset task, not by the main
+/// thread's audio system when it starts (an `AudioSource` parses its
+/// Vorbis headers there, a few ms each), and freed again once played
+/// rather than every line held as PCM for the whole run.
 #[derive(Resource)]
-struct TipVoiceBank(Vec<(u16, Handle<AudioSource>)>);
+struct TipVoiceBank(AssetServer);
 
 impl TipVoiceBank {
-    fn get(&self, n: u16) -> Option<&Handle<AudioSource>> {
-        self.0.iter().find(|(k, _)| *k == n).map(|(_, h)| h)
+    fn get(&self, n: u16) -> Option<Handle<Sfx>> {
+        TIP_VOICES
+            .contains(&n)
+            .then(|| self.0.load(format!("sounds/tips/{n}.ogg")))
     }
 }
 
 fn load_tip_voices(mut commands: Commands, assets: Res<AssetServer>) {
-    commands.insert_resource(TipVoiceBank(
-        TIP_VOICES
-            .iter()
-            .map(|&n| (n, assets.load(format!("sounds/tips/{n}.ogg"))))
-            .collect(),
-    ));
+    commands.insert_resource(TipVoiceBank(assets.clone()));
 }
 
 /// The volume the click toggle restores ("Voice: ON") after muting.
@@ -866,9 +868,10 @@ fn play_voice(commands: &mut Commands, bank: Option<&TipVoiceBank>, n: u16, gain
     if gain <= 0.0 {
         return;
     }
+    // Bevy's player starts it once it has loaded.
     if let Some(handle) = bank.and_then(|b| b.get(n)) {
         commands.spawn((
-            AudioPlayer(handle.clone()),
+            AudioPlayer(handle),
             PlaybackSettings::DESPAWN.with_volume(Volume::Linear(gain)),
             TipVoice,
         ));
@@ -965,27 +968,31 @@ fn dispense_tips(
     mut nodes: Query<&mut Node, With<TipBox>>,
     mut commands: Commands,
 ) {
-    let census = settings
-        .tips
-        .then(|| {
-            census(
-                local.as_deref(),
-                &units,
-                tick.as_deref(),
-                buffer.as_deref(),
-                setup.as_deref(),
-            )
-        })
-        .flatten();
-    let Some(census) = census else {
+    // Shown to a seated player with tips on; the census (a pass over
+    // every unit) only when a new tip is due.
+    if !settings.tips
+        || local
+            .as_deref()
+            .copied()
+            .and_then(LocalTeam::seat)
+            .is_none()
+    {
         for e in &roots {
             commands.entity(e).despawn();
         }
         return;
-    };
+    }
 
     dispenser.next_in -= time.delta_secs();
-    if dispenser.next_in <= 0.0 {
+    if dispenser.next_in <= 0.0
+        && let Some(census) = census(
+            local.as_deref(),
+            &units,
+            tick.as_deref(),
+            buffer.as_deref(),
+            setup.as_deref(),
+        )
+    {
         dispenser.next_in = TIP_PERIOD;
         let side = census.side().unwrap_or(Faction::Network);
         let tip = pick_tip(

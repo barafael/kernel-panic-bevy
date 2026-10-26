@@ -1856,7 +1856,6 @@ pub struct LobbyRoom {
     /// The room this game's last networked match came from, as it was
     /// at the start: "Back to room" resumes it ([`Lobby::resume`]).
     pub last: Option<(RoomId, Option<RoomState>)>,
-    #[cfg(target_arch = "wasm32")]
     maps: MapHashes,
 }
 
@@ -1923,6 +1922,14 @@ pub enum LobbyAction {
 #[derive(Default)]
 struct MapHashes {
     loading: BTreeMap<String, Handle<crate::map_loading::BytesAsset>>,
+}
+
+/// Native: the map files being read and hashed off the frame (a map is
+/// up to a few MB: a room's map step must not stall the menu).
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Default)]
+struct MapHashes {
+    loading: BTreeMap<String, bevy::tasks::Task<MapHave>>,
 }
 
 pub struct LobbyPlugin;
@@ -2227,7 +2234,7 @@ fn pump_lobby(
     l.poll(time.elapsed());
     if let (Some(map), Some(catalog)) = (l.map_needed().map(str::to_string), catalog.as_deref()) {
         #[cfg(not(target_arch = "wasm32"))]
-        let have = Some(read_map_hash(catalog, &map));
+        let have = room.maps.fetch(catalog, &map);
         #[cfg(target_arch = "wasm32")]
         let have = room.maps.fetch(catalog, &map, &server, &bytes);
         if let Some(have) = have {
@@ -2269,10 +2276,26 @@ fn catalog_file<'a>(
         .find(|p| p.file_stem().is_some_and(|s| s.to_string_lossy() == map))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+impl MapHashes {
+    /// Native: read and hash `map`'s catalog file on the IO pool
+    /// (`None` while it runs).
+    fn fetch(&mut self, catalog: &crate::map_loading::MapCatalog, map: &str) -> Option<MapHave> {
+        let task = self.loading.entry(map.to_string()).or_insert_with(|| {
+            let (file, map) = (catalog_file(catalog, map).cloned(), map.to_string());
+            bevy::tasks::IoTaskPool::get_or_init(bevy::tasks::TaskPool::new)
+                .spawn(async move { read_map_hash(file.as_deref(), &map) })
+        });
+        let have = bevy::tasks::futures::check_ready(task)?;
+        self.loading.remove(map);
+        Some(have)
+    }
+}
+
 /// Native: the catalog file of `map`, hashed.
 #[cfg(not(target_arch = "wasm32"))]
-fn read_map_hash(catalog: &crate::map_loading::MapCatalog, map: &str) -> MapHave {
-    match catalog_file(catalog, map).map(std::fs::read) {
+fn read_map_hash(file: Option<&std::path::Path>, map: &str) -> MapHave {
+    match file.map(std::fs::read) {
         Some(Ok(bytes)) => MapHave::Hash(super::compat::map_hash(&bytes)),
         Some(Err(e)) => {
             warn!("cannot read map {map}: {e}");

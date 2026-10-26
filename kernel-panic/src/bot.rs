@@ -102,7 +102,7 @@ use bevy::math::ops;
 use std::collections::VecDeque;
 use std::fmt::Write as _;
 use std::fs;
-use std::io::Write as _;
+use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::path::PathBuf;
 
 use bevy::ecs::system::SystemParam;
@@ -249,16 +249,30 @@ impl Bot {
         info!("KP_BOT: {line}");
     }
 
-    /// New complete lines appended to `cmd` since the last read.
+    /// New complete lines appended to `cmd` since the last read. Runs
+    /// every tick: the file's length says whether anything was added,
+    /// and only the new end of it is read.
     fn read_new_commands(&mut self) {
-        let Ok(bytes) = fs::read(self.dir.join("cmd")) else {
+        let path = self.dir.join("cmd");
+        let Ok(len) = fs::metadata(&path).map(|m| m.len()) else {
             return;
         };
-        if (bytes.len() as u64) < self.cmd_offset {
+        if len < self.cmd_offset {
             // Truncated: start over.
             self.cmd_offset = 0;
         }
-        let mut rest = &bytes[self.cmd_offset as usize..];
+        if len == self.cmd_offset {
+            return;
+        }
+        let mut bytes = Vec::new();
+        let read = fs::File::open(&path).and_then(|mut f| {
+            f.seek(SeekFrom::Start(self.cmd_offset))?;
+            f.read_to_end(&mut bytes)
+        });
+        if read.is_err() {
+            return;
+        }
+        let mut rest = &bytes[..];
         while let Some(nl) = rest.iter().position(|&b| b == b'\n') {
             let line = String::from_utf8_lossy(&rest[..nl]).trim().to_string();
             self.cmd_offset += nl as u64 + 1;

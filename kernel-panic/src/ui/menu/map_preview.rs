@@ -121,20 +121,17 @@ fn choose_map(
     let Some(catalog) = catalog else {
         return;
     };
-    let names = catalog.names();
     let hovered = focus
         .entity
         .and_then(|e| buttons.get(e).ok())
         .and_then(|b| match b.action {
-            super::MenuAction::PickMap(i) => names.get(i).cloned(),
+            super::MenuAction::PickMap(i) => catalog.name(i),
             _ => None,
         });
-    let wanted = hovered.or_else(|| preview.wanted.clone()).or_else(|| {
-        config
-            .map
-            .and_then(|i| names.get(i).cloned())
-            .or_else(|| names.first().cloned())
-    });
+    let wanted = hovered
+        .or_else(|| preview.wanted.clone())
+        .or_else(|| config.map.and_then(|i| catalog.name(i)))
+        .or_else(|| catalog.name(0));
     if preview.wanted != wanted {
         preview.wanted = wanted;
     }
@@ -153,7 +150,10 @@ fn drive_turntable(
     mut transforms: Query<&mut Transform>,
     mut commands: Commands,
 ) {
-    let preview = &mut *preview;
+    // The caption (`map_preview_info`) follows the resource's changes,
+    // which are the page's choice (`choose_map`): the turntable's own
+    // bookkeeping, the spin every frame among it, is no news to it.
+    let preview = preview.bypass_change_detection();
     let Some(wanted) = preview.wanted.clone() else {
         tear_down(&mut commands, preview);
         return;
