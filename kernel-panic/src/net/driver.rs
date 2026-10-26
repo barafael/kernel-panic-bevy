@@ -153,6 +153,53 @@ impl CatchUp {
 /// still updates four times a second.
 pub const FAST_FORWARD_BUDGET: Duration = Duration::from_millis(250);
 
+/// Spring's balance of sim and drawing
+/// (`CGame::GetNetMessageProcessingTimeLimit`,
+/// `rts/Net/NetCommands.cpp:245-257`): the ticks of a frame stop once
+/// they have taken `(1 - b) / b` times what drawing takes (`b`:
+/// `MinSimDrawBalance`, 0.15), between 5 ms and the `MinDrawFPS` (2)
+/// frame. Without it a fast game speed asks for more ticks per frame
+/// than the machine has time for, the frame grows by the ticks it ran,
+/// and the next frame asks for more still. Wall-clock frames only: a
+/// clock driven by hand (tests, headless) has no drawing to balance.
+#[derive(Clone, Debug)]
+pub struct DrawBalance {
+    /// Wall time a frame spends outside the ticks, smoothed
+    /// (`gu->avgDrawFrameTime`, mixed by 0.05 a frame, `Game.cpp:1545`).
+    avg_draw: Duration,
+    /// When the last frame's ticks began, and what they took.
+    last: Option<(Duration, Duration)>,
+}
+
+impl Default for DrawBalance {
+    fn default() -> Self {
+        Self {
+            avg_draw: Duration::from_millis(5),
+            last: None,
+        }
+    }
+}
+
+impl DrawBalance {
+    const MIN_SIM_DRAW_BALANCE: f64 = 0.15;
+    const MIN: Duration = Duration::from_millis(5);
+    /// `1000 / MinDrawFPS` ms.
+    const MAX: Duration = Duration::from_millis(500);
+
+    /// Take in the frame that ended at `now`; the wall time this
+    /// frame's ticks may take.
+    fn limit(&mut self, now: Duration) -> Duration {
+        if let Some((began, ticks)) = self.last {
+            let draw = now.saturating_sub(began).saturating_sub(ticks);
+            self.avg_draw = self.avg_draw.mul_f64(0.95) + draw.mul_f64(0.05);
+        }
+        let b = Self::MIN_SIM_DRAW_BALANCE;
+        self.avg_draw
+            .mul_f64((1.0 - b) / b)
+            .clamp(Self::MIN, Self::MAX)
+    }
+}
+
 /// The frame clock: game time not yet turned into ticks.
 #[derive(Clone, Debug)]
 pub struct Pacer {
@@ -182,6 +229,9 @@ pub struct Pacer {
     pub cost: Option<Duration>,
     /// With [`Self::cost`]: the frame time left for ticks.
     pub capacity: Duration,
+    /// Wall-clock frames: the ticks leave drawing its share of the
+    /// frame (`None`: no limit but the catch-up's).
+    pub balance: Option<DrawBalance>,
 }
 
 impl Default for Pacer {
@@ -196,6 +246,7 @@ impl Default for Pacer {
             load: LoadMeter::default(),
             cost: None,
             capacity: Duration::ZERO,
+            balance: None,
         }
     }
 }
@@ -209,7 +260,8 @@ pub struct FrameReport {
     pub extra: u32,
     /// The clock was due a tick and no turn was there.
     pub starved: bool,
-    /// The machine had no time for more ticks ([`Pacer::cost`]).
+    /// The machine had no time for more ticks ([`Pacer::cost`],
+    /// [`Pacer::balance`]).
     pub busy: bool,
 }
 
@@ -263,8 +315,19 @@ pub fn drive_frame(
         // fit, with nothing banked beyond one.
         p.capacity = (p.capacity + delta).min(delta + cost);
     }
+    // Fast-forwarding has its own budget, as Spring's reconnect.
+    let fast_forward = p.fast_forward;
+    let balance = p.balance.as_mut().map(|b| (b.limit(now), Instant::now()));
     while !s.halted() && !p.hold {
         if p.cost.is_some_and(|c| p.capacity < c) {
+            rep.busy = true;
+            break;
+        }
+        // At least one tick a frame, however slow.
+        if rep.paced + rep.extra > 0
+            && !fast_forward
+            && balance.is_some_and(|(limit, t)| t.elapsed() >= limit)
+        {
             rep.busy = true;
             break;
         }
@@ -309,6 +372,9 @@ pub fn drive_frame(
         } else {
             break;
         }
+    }
+    if let (Some(b), Some((_, t))) = (p.balance.as_mut(), balance) {
+        b.last = Some((now, t.elapsed()));
     }
     if rep.paced + rep.extra == 0 && r.speed().paused && !s.halted() {
         // No tick while paused, but commands still go out: the one that
@@ -756,6 +822,12 @@ pub fn drive_fixed_main(world: &mut World) {
         let net = &mut *net;
         if !net.seated {
             net.seated = true;
+            let wall_clock = world
+                .get_resource::<bevy::time::TimeUpdateStrategy>()
+                .is_none_or(|s| matches!(s, bevy::time::TimeUpdateStrategy::Automatic));
+            if wall_clock {
+                net.pacer.balance = Some(DrawBalance::default());
+            }
             if net.session.is_networked() {
                 seat_networked(world, &mut net.session);
             }
@@ -1036,5 +1108,39 @@ mod tests {
             got.abs_diff(expect) <= 1,
             "{got} ticks, Bevy's loop {expect} ({total:?})"
         );
+    }
+
+    /// Drawing that takes 6 ms of a frame leaves the ticks 34 ms
+    /// (85 : 15), within Spring's 5 ms floor and 500 ms ceiling.
+    #[test]
+    fn the_ticks_leave_drawing_its_share() {
+        let ms = Duration::from_millis;
+        let mut b = DrawBalance::default();
+        let mut now = Duration::ZERO;
+        for _ in 0..400 {
+            b.limit(now);
+            // 4 ms of ticks, 6 ms of everything else.
+            b.last = Some((now, ms(4)));
+            now += ms(10);
+        }
+        let limit = b.limit(now);
+        assert!(limit.abs_diff(ms(34)) < ms(1), "{limit:?}");
+        // Frames that are all ticks.
+        let mut idle = DrawBalance {
+            last: Some((Duration::ZERO, now)),
+            ..default()
+        };
+        for _ in 0..400 {
+            idle.limit(now);
+        }
+        assert_eq!(idle.limit(now), DrawBalance::MIN);
+        let mut slow = DrawBalance {
+            last: Some((Duration::ZERO, Duration::ZERO)),
+            ..default()
+        };
+        for _ in 0..400 {
+            slow.limit(ms(1000));
+        }
+        assert_eq!(slow.limit(ms(1000)), DrawBalance::MAX);
     }
 }
