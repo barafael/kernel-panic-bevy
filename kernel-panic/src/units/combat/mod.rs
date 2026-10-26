@@ -239,18 +239,13 @@ pub(crate) fn free_line_of_fire(
 /// Sim frames before a unit holding a good auto-target scans for a
 /// better one: `CWeapon::AllowWeaponAutoTarget`'s
 /// `frameNum > lastTargetRetry + 65` (`Weapon.cpp`), counted from the
-/// scan that picked the target — using the target doesn't push it back.
+/// scan that picked the target — using the target doesn't push it back —
+/// and checked on the unit's slow updates.
 /// The cache is dropped at once when the target dies, hides or leaves
 /// weapon range, so this only controls how quickly a unit abandons a
 /// valid target for a newly-arrived closer one — not how fast it reacts
 /// to kills.
 const TARGET_RESCAN_FRAMES: u64 = 65;
-
-/// Sim frames between scans while the unit holds a `BadTargetCategory`
-/// target, or found nothing at all: `CWeapon::SlowUpdate` runs
-/// `AutoTarget` every `UNIT_SLOWUPDATE_RATE` frames, and lets it re-pick
-/// a bad target each time.
-const TARGET_SLOW_RESCAN_FRAMES: u64 = crate::sim::SLOW_UPDATE_RATE as u64;
 
 /// The last auto-target scan of an armed unit (`CWeapon::currentTarget` +
 /// `lastTargetRetry`). While the target is alive, visible and in range
@@ -912,7 +907,7 @@ pub fn combat_system(
         worm_splash,
         mut aim_slot,
         mut cache_slot,
-        (nx_cast, debug_blasted, _),
+        (nx_cast, debug_blasted, net_id),
     ) in attackers.iter_mut().sort::<&NetId>()
     {
         // pointer.bos `AimWeapon1`: `if (aimingSpecial) return 0` — a
@@ -930,6 +925,11 @@ pub fn combat_system(
         // worm.bos `STANDINGFIREORDERS=0` while cloaked with AutoHold on:
         // hold fire — only the player's explicit targets engage.
         let hold_fire = cloaked && autohold.is_some_and(|a| a.0);
+        // Scans come from `CWeapon::SlowUpdate`: the unit's first one
+        // from `earliest` on. Units stagger by id there, so attackers
+        // whose shared target died don't all rescan on one frame ever
+        // after.
+        let rescan_at = |earliest| crate::sim::next_slow_update(earliest, net_id.0);
 
         // Deployable: keep aiming through Opening so the gun is on
         // target when the state flips, but only fire while Open.
@@ -1204,7 +1204,7 @@ pub fn combat_system(
             if scanned {
                 let cache = TargetCache {
                     target: None,
-                    rescan_frame: frame + TARGET_SLOW_RESCAN_FRAMES,
+                    rescan_frame: rescan_at(frame + 1),
                 };
                 put(&mut commands, entity, &mut cache_slot, cache);
             } else if scan_due {
@@ -1217,13 +1217,13 @@ pub fn combat_system(
             // window — at the next `SlowUpdate` for a bad target.
             TargetSource::Scanned => {
                 let wait = if rank.bad {
-                    TARGET_SLOW_RESCAN_FRAMES
+                    1
                 } else {
-                    TARGET_RESCAN_FRAMES
+                    TARGET_RESCAN_FRAMES + 1
                 };
                 let cache = TargetCache {
                     target: Some(target_entity),
-                    rescan_frame: frame + wait,
+                    rescan_frame: rescan_at(frame + wait),
                 };
                 put(&mut commands, entity, &mut cache_slot, cache);
             }
@@ -2728,8 +2728,9 @@ mod tests {
     /// `BadTargetCategory` target rescans at the next `SlowUpdate`
     /// (15 frames) and switches to a good target that arrived; a good
     /// target is kept for the 65-frame retry window counted from the
-    /// scan that picked it — using it doesn't push the rescan back (it
-    /// used to, so the rescan never ran while the target lived).
+    /// scan that picked it, until the first slow update after it — using
+    /// it doesn't push the rescan back (it used to, so the rescan never
+    /// ran while the target lived).
     #[test]
     fn auto_target_rescans_on_the_upstream_schedule() {
         // --- Bad target (Socket for a Bit): switch after 15 frames. ---
@@ -2750,7 +2751,8 @@ mod tests {
         app.world_mut().run_system_once(combat_system).unwrap();
         assert_eq!(cached_target(&app, bit), Some(enemy_bit), "frame 15");
 
-        // --- Good target: a closer one wins only at frame 65. ---
+        // --- Good target: a closer one wins only at the first slow
+        // update after frame 65 (75 for unit 0). ---
         let mut app = combat_app(line_weapon_registry());
         // (A registry without the Bit's FBI ranks every target "bad".)
         app.insert_resource(bit_vs_socket_registry());
@@ -2760,12 +2762,12 @@ mod tests {
         app.world_mut().run_system_once(combat_system).unwrap();
         assert_eq!(cached_target(&app, bit), Some(far));
         let near = live_enemy(&mut app, UnitKind::Bit, Vec3::new(50.0, 0.0, 0.0), 0.0);
-        advance_frames(&mut app, 64);
+        advance_frames(&mut app, 74);
         app.world_mut().run_system_once(combat_system).unwrap();
-        assert_eq!(cached_target(&app, bit), Some(far), "frame 64");
+        assert_eq!(cached_target(&app, bit), Some(far), "frame 74");
         advance_frames(&mut app, 1);
         app.world_mut().run_system_once(combat_system).unwrap();
-        assert_eq!(cached_target(&app, bit), Some(near), "frame 65");
+        assert_eq!(cached_target(&app, bit), Some(near), "frame 75");
     }
 
     /// After a scan that found nothing the unit waits for the next slow

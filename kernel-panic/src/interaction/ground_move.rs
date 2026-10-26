@@ -31,6 +31,7 @@ use std::f32::consts::{PI, TAU};
 
 use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
+use bevy::tasks::{ComputeTaskPool, TaskPool};
 
 use super::movement::{
     AttackMoveActive, CommandQueue, GroundLift, LayerKey, MovePath, MoveTarget, NavGridSet,
@@ -141,12 +142,111 @@ pub struct PathStats {
 }
 
 impl PathStats {
+    fn count(&mut self, caught_up: CaughtUp) {
+        match caught_up {
+            CaughtUp::Current => {}
+            CaughtUp::Updated => self.label_updates += 1,
+            CaughtUp::Relabelled => self.labellings += 1,
+        }
+    }
+
     fn outcome(&mut self, outcome: &Option<PathOutcome>) {
         match outcome {
             Some(PathOutcome::Route(p)) if p.reached_goal => self.reached += 1,
             Some(PathOutcome::Route(_)) => self.partial += 1,
             _ => self.unreachable += 1,
         }
+    }
+}
+
+/// How [`catch_up`] brought a layer to the current revision.
+#[derive(Clone, Copy)]
+enum CaughtUp {
+    Current,
+    /// From the changed squares of each revision since.
+    Updated,
+    /// Every square compared: the change ring no longer reached back.
+    Relabelled,
+}
+
+/// Bring `layer`, current for revision `rev`, up to `nav`'s revision
+/// (`PathManager::UpdateNodeLayer` on every changed rectangle since).
+fn catch_up(nav: &NavGridSet, key: LayerKey, rev: &mut u64, layer: &mut NodeLayer) -> CaughtUp {
+    if *rev == nav.revision {
+        return CaughtUp::Current;
+    }
+    let Some(bucket) = nav.buckets.get(key.0) else {
+        return CaughtUp::Current;
+    };
+    let (speed_map, mask) = (&bucket.speed_map, nav.structures.mask(key.1, key.2));
+    let since = std::mem::replace(rev, nav.revision);
+    match nav.changes_since_each(since) {
+        Some(changes) => {
+            layer.update(
+                speed_map,
+                mask,
+                changes.map(|b| QtRect {
+                    x0: b[0],
+                    z0: b[1],
+                    x1: b[2] + 1,
+                    z1: b[3] + 1,
+                }),
+            );
+            CaughtUp::Updated
+        }
+        None => {
+            // The change ring no longer reaches back: compare every
+            // square and rebuild only the blocks that differ (the same
+            // tree as tesselating anew, for far less work).
+            layer.refresh(speed_map, mask);
+            CaughtUp::Relabelled
+        }
+    }
+}
+
+/// Every mover class's node layer brought up to this tick's nav
+/// revision before anyone paths, as QTPFS updates its layers in
+/// `PathManager::Update` ahead of the searches. Requested lazily, a
+/// class's first path copied the map's bare-terrain layer and compared
+/// every square (the feature stamps had long overflowed the change
+/// ring), 5–10 ms in the middle of a match, and so did any class idle
+/// for more than the ring's revisions. The bare-terrain layers are
+/// moved in here, and the classes are independent, so they catch up in
+/// parallel. The class of the search in flight waits: its nodes hold
+/// still until the search ends, and [`PathQueue::layer`] catches it up
+/// at the next one.
+pub fn update_path_layers(nav: Option<ResMut<NavGridSet>>, mut queue: ResMut<PathQueue>) {
+    let Some(mut nav) = nav else {
+        return;
+    };
+    let queue = &mut *queue;
+    queue.follow_epoch(nav.epoch);
+    if !nav.terrain_layers.is_empty() {
+        for (key, layer) in nav.bypass_change_detection().terrain_layers.drain() {
+            queue.layers.entry(key).or_insert((0, layer));
+        }
+    }
+    let nav = &*nav;
+    let busy = queue.in_flight.as_ref().map(|f| f.layer);
+    let mut stale: Vec<_> = queue
+        .layers
+        .iter_mut()
+        .filter(|(key, (rev, _))| Some(**key) != busy && *rev != nav.revision)
+        .collect();
+    let caught_up = match stale.len() {
+        0 => return,
+        1 => {
+            let (&key, (rev, layer)) = stale.pop().expect("one stale layer");
+            vec![catch_up(nav, key, rev, layer)]
+        }
+        _ => ComputeTaskPool::get_or_init(TaskPool::default).scope(|scope| {
+            for (&key, (rev, layer)) in stale {
+                scope.spawn(async move { catch_up(nav, key, rev, layer) });
+            }
+        }),
+    };
+    for c in caught_up {
+        queue.stats.count(c);
     }
 }
 
@@ -190,8 +290,8 @@ pub struct PathQueue {
     /// sized to the old grid).
     epoch: u64,
     /// One QTPFS [`NodeLayer`] per mover class with the nav revision it
-    /// is current for; built on the first request of a class and
-    /// brought up to date through the change ring.
+    /// is current for; moved in from the map's bare-terrain layers and
+    /// kept current each tick by [`update_path_layers`].
     layers: HashMap<LayerKey, (u64, NodeLayer)>,
     pending: std::collections::VecDeque<Entity>,
     queued: bevy::platform::collections::HashSet<Entity>,
@@ -214,10 +314,10 @@ pub struct PathQueue {
 }
 
 impl PathQueue {
-    /// The node layer of `req`'s class, current for `nav`'s revision
-    /// (`PathManager::UpdateNodeLayer` on every changed rectangle
-    /// since), built from scratch when missing or when the change ring
-    /// no longer reaches back far enough.
+    /// The node layer of `req`'s class, current for `nav`'s revision.
+    /// [`update_path_layers`] keeps every class current each tick; this
+    /// catches up the class whose search was in flight then, and builds
+    /// a layer the map did not bring (labelled from scratch).
     fn layer<'a>(
         &mut self,
         nav: &'a NavGridSet,
@@ -239,34 +339,25 @@ impl PathQueue {
             self.stats.labellings += 1;
             return Some((key, speed_map, mask));
         };
-        if *rev == nav.revision {
-            return Some((key, speed_map, mask));
-        }
-        match nav.changes_since_each(*rev) {
-            Some(changes) => {
-                layer.update(
-                    speed_map,
-                    mask,
-                    changes.map(|b| QtRect {
-                        x0: b[0],
-                        z0: b[1],
-                        x1: b[2] + 1,
-                        z1: b[3] + 1,
-                    }),
-                );
-                *rev = nav.revision;
-                self.stats.label_updates += 1;
-            }
-            None => {
-                // The change ring no longer reaches back: compare every
-                // square and rebuild only the blocks that differ (the
-                // same tree as tesselating anew, for far less work).
-                layer.refresh(speed_map, mask);
-                *rev = nav.revision;
-                self.stats.labellings += 1;
-            }
-        }
+        self.stats.count(catch_up(nav, key, rev, layer));
         Some((key, speed_map, mask))
+    }
+
+    /// A new map drops everything (layers, the search in flight and its
+    /// scratch are sized to the old grid).
+    fn follow_epoch(&mut self, epoch: u64) {
+        if epoch == self.epoch {
+            return;
+        }
+        self.epoch = epoch;
+        self.pending.clear();
+        self.queued.clear();
+        self.in_flight = None;
+        self.results.clear();
+        self.layers.clear();
+        self.shared.clear();
+        self.repair_failed.clear();
+        self.scratch = Default::default();
     }
 
     /// Begin `req`'s search on its class's layer, unless it needs none
@@ -436,18 +527,8 @@ impl PathQueue {
         registry: &UnitRegistry,
         describe: impl Fn(Entity) -> Option<PathRequest>,
     ) -> usize {
-        if let Some(n) = nav
-            && n.epoch != self.epoch
-        {
-            self.epoch = n.epoch;
-            self.pending.clear();
-            self.queued.clear();
-            self.in_flight = None;
-            self.results.clear();
-            self.layers.clear();
-            self.shared.clear();
-            self.repair_failed.clear();
-            self.scratch = Default::default();
+        if let Some(n) = nav {
+            self.follow_epoch(n.epoch);
         }
         loop {
             if self.in_flight.is_none() {
@@ -1790,32 +1871,43 @@ pub fn movement_system(
                     // before the current waypoint) touch the changed
                     // squares is dirty and re-searched a second later
                     // (`PathCache::MarkDeadPaths`, `QueueDeadPathSearches`).
-                    let area = n.changed_since(p.revision);
+                    // Each revision's rectangle on its own: the box
+                    // around two changes at opposite corners would dirty
+                    // every path between them.
+                    let changes = n.changes_since_each(p.revision);
                     p.revision = n.revision;
                     let from = p.current.max(2) - 2;
-                    // The last damaged node decides where a repair may
-                    // rejoin the path (`firstNodeIdOfCleanPath`).
-                    let last_damaged = area.and_then(|b| {
-                        p.node_rects
-                            .iter()
-                            .enumerate()
-                            .skip(from)
-                            .rev()
-                            .find(|(_, r)| {
-                                r.x0 <= b[2] && r.x1 > b[0] && r.z0 <= b[3] && r.z1 > b[1]
-                            })
-                            .map(|(i, _)| i)
-                    });
-                    let dirty = match area {
-                        None => true,
-                        Some(b) => {
-                            last_damaged.is_some()
-                                || p.waypoints[from.min(p.waypoints.len())..]
-                                    // A raw path's two points share one leaf:
-                                    // its segment is tested too
-                                    // (`MarkDeadPaths`' `intersectsPath`).
-                                    .windows(2)
-                                    .any(|w| NavGridSet::segment_touches(b, w[0].xz(), w[1].xz()))
+                    let (dirty, last_damaged) = match changes {
+                        None => (true, None),
+                        Some(changes) => {
+                            let (mut dirty, mut last_damaged) = (false, None);
+                            for b in changes {
+                                // The last damaged node decides where a
+                                // repair may rejoin the path
+                                // (`firstNodeIdOfCleanPath`).
+                                let hit = p
+                                    .node_rects
+                                    .iter()
+                                    .enumerate()
+                                    .skip(from)
+                                    .rev()
+                                    .find(|(_, r)| {
+                                        r.x0 <= b[2] && r.x1 > b[0] && r.z0 <= b[3] && r.z1 > b[1]
+                                    })
+                                    .map(|(i, _)| i);
+                                last_damaged = last_damaged.max(hit);
+                                dirty = dirty
+                                    || hit.is_some()
+                                    || p.waypoints[from.min(p.waypoints.len())..]
+                                        // A raw path's two points share one
+                                        // leaf: its segment is tested too
+                                        // (`MarkDeadPaths`' `intersectsPath`).
+                                        .windows(2)
+                                        .any(|w| {
+                                            NavGridSet::segment_touches(b, w[0].xz(), w[1].xz())
+                                        });
+                            }
+                            (dirty, last_damaged)
                         }
                     };
                     if dirty && p.dirty_at.is_none() {

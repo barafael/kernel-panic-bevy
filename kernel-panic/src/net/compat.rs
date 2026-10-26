@@ -83,12 +83,16 @@ use super::state::Fnv;
 /// Alt a pass per slow update until the buffer is empty; it replaces the
 /// teleporter's orders. The buffer is clamped to the room under the unit
 /// limit every 8th frame (`network_buffer.lua`).
+/// 19 (2026-10-26): every mover class's QTPFS layer is brought up to the
+/// nav revision each tick (before, on its class's next request); auto-
+/// target rescans land on the unit's slow updates; a path is dirtied by
+/// each changed rectangle on its own, not by their bounding box.
 ///
 /// [`SimCommand::Dropped`]: crate::net::SimCommand::Dropped
 /// [`SimCommand::Returned`]: crate::net::SimCommand::Returned
 /// [`SimCommand::InternalSpeed`]: crate::net::SimCommand::InternalSpeed
 /// [`MatchRules`]: crate::net::MatchRules
-pub const SIM_VERSION: u32 = 18;
+pub const SIM_VERSION: u32 = 19;
 
 /// The map-independent half of [`Compat`]: what a peer announces when
 /// it joins a room, before any map is chosen.

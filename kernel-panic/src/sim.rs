@@ -61,6 +61,13 @@ pub fn slow_update_due(frame: u64, id: u32) -> bool {
     (frame + u64::from(id)).is_multiple_of(u64::from(SLOW_UPDATE_RATE))
 }
 
+/// The first frame from `frame` on where unit `id`'s `SlowUpdate` falls
+/// (see [`slow_update_due`]).
+pub fn next_slow_update(frame: u64, id: u32) -> u64 {
+    let rate = u64::from(SLOW_UPDATE_RATE);
+    frame + (rate - (frame + u64::from(id)) % rate) % rate
+}
+
 /// Gravity per frame² (negative = down) of the usual Kernel Panic map,
 /// `gravity=50` (`mapInfo->map.gravity = -50 / GAME_SPEED²`). Not every
 /// shipped map uses it (Speed Balls 40, Major Madness and pacman 100,
@@ -447,6 +454,18 @@ pub fn assert_float_env() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The next slow update is the first due frame, today's included.
+    #[test]
+    fn next_slow_update_is_the_first_due_frame() {
+        for id in [0, 1, 7, 14, 15, 1234] {
+            for frame in 0..40 {
+                let next = next_slow_update(frame, id);
+                assert!(slow_update_due(next, id), "id {id} frame {frame}");
+                assert!((frame..next).all(|f| !slow_update_due(f, id)));
+            }
+        }
+    }
 
     /// A build facing fronts the quarter heading `facing()` reads back.
     #[test]

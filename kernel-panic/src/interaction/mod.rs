@@ -222,6 +222,10 @@ pub(crate) fn unit_motion_systems() -> ScheduleConfigs<ScheduleSystem> {
         guard_follow_system.before(movement_system),
         // Buildings stamped / cleared before anyone paths.
         structures::update_structure_layer.before(movement_system),
+        // Every class's layer current with this tick's stamps.
+        ground_move::update_path_layers
+            .after(structures::update_structure_layer)
+            .before(movement_system),
         movement_system,
         // `smoothGround.UpdateSmoothMesh()` precedes the unit
         // updates in the engine's frame.

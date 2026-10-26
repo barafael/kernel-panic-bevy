@@ -264,8 +264,8 @@ pub struct NavGridSet {
     /// Squares blocked by buildings, and per-mover-class path masks.
     pub structures: super::structures::StructureLayer,
     /// QTPFS layers of the bare terrain for every mover class, built
-    /// with the map off the main thread; the path service starts each
-    /// class from a copy (at revision 0) and replays the structure
+    /// with the map off the main thread; the path service moves them
+    /// out on the first tick (at revision 0) and replays the structure
     /// changes since, instead of tesselating a whole map in one tick.
     pub terrain_layers: HashMap<LayerKey, spring_pathfinding::qtpfs::NodeLayer>,
     /// The map's terrain-type speed per square (`GetPosSpeedMod`'s
