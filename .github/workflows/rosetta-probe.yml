@@ -86,6 +86,10 @@ jobs:
       - name: Hash the binary
         run: shasum -a 256 target/x86_64-apple-darwin/release/kernel-panic
       - name: Probe
+        env:
+          # Every tick's state hashed eight more times, each compared
+          # with the first (`headless::log_hash`).
+          KP_CAPTURE_REPEAT: 8
         run: |
           bash .github/scripts/rosetta-probe.sh \
             target/x86_64-apple-darwin/release/kernel-panic "$GOLDEN_DIR" reference \

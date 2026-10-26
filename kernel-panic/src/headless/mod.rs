@@ -203,6 +203,26 @@ fn log_hash(world: &mut World) {
     }
     let c = state::capture(world);
     let tick = world.resource::<HashLog>().ticks.len() + 1;
+    // The Rosetta probe: `KP_CAPTURE_REPEAT=<n>` hashes the same state
+    // n more times and reports a capture that disagrees with the first
+    // (the game's exact hash code under the game's exact conditions,
+    // n+1 times the exposure per tick).
+    static REPEAT: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    let repeat = *REPEAT.get_or_init(|| {
+        std::env::var("KP_CAPTURE_REPEAT")
+            .ok()
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(0)
+    });
+    for k in 0..repeat {
+        let again = state::capture(world);
+        if again.sim_hash != c.sim_hash || again.part_hashes != c.part_hashes {
+            eprintln!(
+                "capture self-disagreement at tick {tick}, repeat {k}: sim {:016x} vs {:016x}, parts {:016x?} vs {:016x?}",
+                c.sim_hash, again.sim_hash, c.part_hashes, again.part_hashes
+            );
+        }
+    }
     if world.resource::<HashLog>().dump_at.contains(&tick) {
         let lines = state::describe(world);
         world.resource_mut::<HashLog>().dumps.push((tick, lines));
