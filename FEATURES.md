@@ -130,7 +130,8 @@ read the resulting state.
   (and, as `attack` commands, SIGTERM, Firewall and the Obelisk's
   Attack), Move=M, Fight=F, Patrol=P, Guard=G, AutoHold=H (Worm and Security
   Hole, whose Worms inherit it), Enter=E (Packet), Clear=E
-  (constructor), Undeploy=U (Exploit), `Ctrl+D` self-destruct with a
+  (constructor), Undeploy=U (Exploit), Bombard=B (Bug; a remake key,
+  §15), `Ctrl+D` self-destruct with a
   5-second countdown (cancelled by `Stop`), set target=T and
   unset target=X (remake extras: no panel button, as in KP), `,` / `.`
   previous / next panel page, and keypad 2/4/6/8 arm the selected
@@ -214,7 +215,8 @@ read the resulting state.
     into build range of each, nearest first (`CBuilderCAI::
     ExecuteReclaim`). A right-click on a clearable feature with a
     constructor selected is the same order.
-  - **Bombard** (`bug_bombard.lua`, a Bug's button before Deploy): a
+  - **Bombard** (`bug_bombard.lua`, a Bug's button before Deploy, or
+    `B`): a
     click on an enemy or the ground sends the Bugs to within 1150 elmos,
     where they deploy and the Exploits attack the target; Alt deploys
     only. The Exploit keeps the Bug's selection.
@@ -581,10 +583,14 @@ modrules (QTPFS, `allowUnitCollisionOverlap=1`,
   place as the new kind (mutual-morph pair, in-place re-spawn). An
   Exploit cannot move.
 - Hotkeys: `D` deploys (unless the selection has a Pointer, whose NX
-  Flag comes first), `U` undeploys. Also on the command panel as the
-  **Deploy** (Bug) / **Undeploy** (Exploit) button. Upstream's `D` on a
-  Bug arms Bombard (it carries `dgun`); here `D` stays Deploy and
-  Bombard is the button.
+  Flag comes first), `U` undeploys, `B` arms Bombard. Also on the
+  command panel as the **Deploy** (Bug) / **Undeploy** (Exploit) and
+  **Bombard** buttons.
+- **Divergence from KP, by choice:** upstream's `D` on a Bug arms
+  Bombard (`bug_bombard.lua` gives it the `dgun` action, which
+  `kp_hotkeys.lua` binds before `deploy`), so there Deploy has no key.
+  Here `D` deploys at once and `B`, which neither Spring nor KP binds,
+  arms Bombard.
 
 ## 16. Infection chain
 

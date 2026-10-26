@@ -106,8 +106,9 @@ fn minifac_of(kind: UnitKind) -> Option<UnitKind> {
 /// the gadget commands SIGTERM (`airstrike.lua`), Firewall
 /// (`network_reflectorshield.lua`) and the Obelisk's Attack;
 /// `kp_hotkeys.lua` binds `d` to `dgun` (NX Flag), `deploy`,
-/// `launchmines` and `dispatch`. Upstream's Bombard carries `dgun` too;
-/// here `D` on a Bug stays the instant Deploy and Bombard is the button.
+/// `launchmines` and `dispatch`. Upstream's Bombard carries `dgun` too,
+/// so KP's `D` on a Bug arms Bombard; here, a deliberate divergence, `D`
+/// deploys and `B` (unbound in Spring and KP) arms Bombard.
 const KEY_ACTIONS: [(KeyCode, &[&[CmdId]]); 2] = [
     (
         KeyCode::KeyA,
@@ -160,7 +161,7 @@ pub(super) fn order_hotkeys(
     }
     // `E` is both Enter (Packets) and Clear (constructors), as Spring's
     // `reclaim` and KP's `enter` share it; a selection offers one.
-    const BINDINGS: [(KeyCode, CmdId); 13] = [
+    const BINDINGS: [(KeyCode, CmdId); 14] = [
         (KeyCode::KeyS, CmdId::Stop),
         (KeyCode::KeyF, CmdId::Fight),
         (KeyCode::KeyG, CmdId::Guard),
@@ -172,6 +173,7 @@ pub(super) fn order_hotkeys(
         (KeyCode::KeyE, CmdId::Enter),
         (KeyCode::KeyE, CmdId::Clear),
         (KeyCode::KeyU, CmdId::Undeploy),
+        (KeyCode::KeyB, CmdId::Bombard),
         (KeyCode::Comma, CmdId::PrevPage),
         (KeyCode::Period, CmdId::NextPage),
     ];
@@ -541,6 +543,9 @@ mod tests {
             "dgun is bound before dispatch"
         );
         assert_eq!(key_runs(&[Bug, Port], KeyCode::KeyD), Some(CmdId::Deploy));
+        // A divergence from KP, whose `D` arms Bombard (its `dgun`).
+        assert_eq!(key_runs(&[Bug], KeyCode::KeyD), Some(CmdId::Deploy));
+        assert_eq!(key_runs(&[Bug], KeyCode::KeyB), Some(CmdId::Bombard));
         assert_eq!(key_runs(&[Byte], KeyCode::KeyD), Some(CmdId::LaunchMines));
         assert_eq!(key_runs(&[Exploit], KeyCode::KeyD), None);
         assert_eq!(key_runs(&[Exploit], KeyCode::KeyU), Some(CmdId::Undeploy));
