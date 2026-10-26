@@ -173,6 +173,16 @@ pub struct HashLog {
     /// Ticks (1-based) at which to also dump a readable per-unit state.
     pub dump_at: Vec<usize>,
     pub dumps: Vec<(usize, Vec<String>)>,
+    /// The sim hash every tick is expected to have (a reference trail's):
+    /// the first tick whose hash differs dumps the state of that tick and
+    /// of the one before (every tick is described while this is set, so
+    /// the previous one is at hand). For a divergence that strikes at an
+    /// unpredictable tick (the Rosetta probe).
+    pub expect: Vec<u64>,
+    /// The previous tick's description while `expect` is set.
+    last_described: Option<(usize, Vec<String>)>,
+    /// `expect` was missed once already: no further dumps.
+    mismatched: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -196,6 +206,23 @@ fn log_hash(world: &mut World) {
     if world.resource::<HashLog>().dump_at.contains(&tick) {
         let lines = state::describe(world);
         world.resource_mut::<HashLog>().dumps.push((tick, lines));
+    }
+    let expecting = {
+        let log = world.resource::<HashLog>();
+        !log.mismatched && tick <= log.expect.len()
+    };
+    if expecting {
+        let lines = state::describe(world);
+        let mut log = world.resource_mut::<HashLog>();
+        if log.expect[tick - 1] != c.sim_hash {
+            log.mismatched = true;
+            if let Some(prev) = log.last_described.take() {
+                log.dumps.push(prev);
+            }
+            log.dumps.push((tick, lines));
+        } else {
+            log.last_described = Some((tick, lines));
+        }
     }
     world.resource_mut::<HashLog>().ticks.push(TickHash {
         sim: c.sim_hash,

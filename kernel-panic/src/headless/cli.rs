@@ -5,13 +5,17 @@
 //! kernel-panic --replay <log.kpreplay>… [--trail-dir <dir>] [--ticks <n>]
 //!              [--dump-at <t1,t2…> --dump-dir <dir>] [--ignore-compat]
 //!              [--memory-assets] [--shuffle <every n ticks>]
+//!              [--expect-trail <dir>]
 //! kernel-panic --record-golden [<name>…] [--out <dir>]
 //! kernel-panic --command-fuzz [--ticks <n>] [--seed <n>]
 //! ```
 //!
 //! `--replay` writes `<trail-dir>/<log stem>.trail` (default `trails/`)
 //! per log; `--dump-at` also writes readable unit dumps
-//! `<dump-dir>/<log stem>_<tick>.txt` for the bisect. `--record-golden`
+//! `<dump-dir>/<log stem>_<tick>.txt` for the bisect; `--expect-trail
+//! <dir>` compares every tick's sim hash with `<dir>/<log stem>.trail`
+//! as it goes and dumps the first differing tick and the one before
+//! (for a divergence whose tick is not known ahead). `--record-golden`
 //! records the golden logs ([`super::golden`]), all or the named ones,
 //! into `--out` (default `kernel-panic/tests/golden`). `--command-fuzz`
 //! runs the command fuzz (`net::fuzz`, default 3000 ticks) and fails if
@@ -85,6 +89,7 @@ fn replay_logs(args: &[String]) -> Result<(), String> {
             "--dump-at",
             "--dump-dir",
             "--shuffle",
+            "--expect-trail",
         ],
         &["--ignore-compat", "--memory-assets"],
     )?;
@@ -92,7 +97,8 @@ fn replay_logs(args: &[String]) -> Result<(), String> {
         return Err("--replay needs at least one .kpreplay".into());
     }
     let trail_dir = PathBuf::from(value(&values, "--trail-dir").unwrap_or("trails"));
-    let options = PlayOptions {
+    let expect_dir = value(&values, "--expect-trail").map(PathBuf::from);
+    let mut options = PlayOptions {
         ticks: value(&values, "--ticks")
             .map(|t| t.parse().map_err(|e| format!("--ticks {t}: {e}")))
             .transpose()?,
@@ -106,6 +112,7 @@ fn replay_logs(args: &[String]) -> Result<(), String> {
             .map(|t| t.parse().map_err(|e| format!("--shuffle {t}: {e}")))
             .transpose()?
             .unwrap_or(0),
+        expect: Vec::new(),
     };
     let dump_dir = value(&values, "--dump-dir").map(PathBuf::from);
     std::fs::create_dir_all(&trail_dir).map_err(|e| format!("{}: {e}", trail_dir.display()))?;
@@ -117,6 +124,20 @@ fn replay_logs(args: &[String]) -> Result<(), String> {
             .unwrap_or_else(|| log.to_string());
         let bytes = std::fs::read(path).map_err(|e| format!("{log}: {e}"))?;
         let replay = Replay::decode(&bytes).map_err(|e| format!("{log}: {e}"))?;
+        if let Some(dir) = &expect_dir {
+            // `<dir>/<stem>.trail`: the sim hash is the second column.
+            let f = dir.join(format!("{stem}.trail"));
+            let text = std::fs::read_to_string(&f).map_err(|e| format!("{}: {e}", f.display()))?;
+            options.expect = text
+                .lines()
+                .map(|l| {
+                    l.split(' ')
+                        .nth(1)
+                        .and_then(|h| u64::from_str_radix(h, 16).ok())
+                        .ok_or_else(|| format!("{}: not a trail line: {l}", f.display()))
+                })
+                .collect::<Result<_, _>>()?;
+        }
         let mut map = MapInput::checkout(&replay.setup.map).map_err(|e| e.to_string())?;
         if switches.contains(&"--memory-assets") {
             // An empty asset server, as on wasm (native reads the map
@@ -138,6 +159,25 @@ fn replay_logs(args: &[String]) -> Result<(), String> {
         }
         eprintln!("{}", replay::summary(&stem, &replay, &played));
         eprintln!("  trail: {}", out.display());
+        if let Some(dir) = &expect_dir
+            && let Some(first) = options
+                .expect
+                .iter()
+                .zip(&played.hashes)
+                .position(|(e, h)| *e != h.sim)
+        {
+            eprintln!(
+                "  diverges from {} at tick {}{}",
+                dir.join(format!("{stem}.trail")).display(),
+                first + 1,
+                dump_dir.as_ref().map_or(String::new(), |d| format!(
+                    " (dumps of ticks {} and {} in {})",
+                    first.max(1),
+                    first + 1,
+                    d.display()
+                ))
+            );
+        }
     }
     Ok(())
 }

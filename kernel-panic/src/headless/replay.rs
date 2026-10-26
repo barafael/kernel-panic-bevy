@@ -101,6 +101,10 @@ pub struct PlayOptions {
     pub ignore_compat: bool,
     /// 1-based ticks to also dump a readable per-unit state at.
     pub dump_at: Vec<usize>,
+    /// The sim hash of every tick as a reference trail has it: the first
+    /// tick that differs dumps its state and the previous tick's
+    /// ([`HashLog::expect`]). Empty: no check.
+    pub expect: Vec<u64>,
     /// Every this many ticks (0: never), shuffle the ECS storage order
     /// of every sim entity ([`shuffle_storage`]): a native stand-in for
     /// another machine's archetype history.
@@ -146,6 +150,7 @@ pub async fn play(
         let mut log = h.world_mut().resource_mut::<HashLog>();
         log.enabled = true;
         log.dump_at = options.dump_at.clone();
+        log.expect = options.expect.clone();
     }
     if let Some(w) = replay.frames.windows(2).find(|w| w[1].tick < w[0].tick) {
         return Err(ReplayError::Order {

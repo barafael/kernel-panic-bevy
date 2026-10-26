@@ -145,3 +145,29 @@ impl Plugin for WeaponFxPlugin {
             );
     }
 }
+
+/// One line per sim-moved projectile for the state dumps
+/// (`net::state::describe`): where it is, where it flies and how, so a
+/// trail divergence that begins in the projectiles part can be read.
+pub fn describe_projectiles(world: &mut World) -> Vec<String> {
+    let mut q = world.query::<(Entity, &shared::ProjectileVisual, &SimPose)>();
+    q.iter(world)
+        .map(|(e, p, pose)| {
+            format!(
+                "~proj {e:?} pos {:?} origin {:?} target {:?} speed {} progress {} arc {} \
+                 vel {:?} elapsed {} flight {:?} seed {} last_target {:?}",
+                pose.sim().translation,
+                p.origin,
+                p.target,
+                p.speed,
+                p.progress,
+                p.arc_height,
+                p.velocity,
+                p.elapsed,
+                p.flight,
+                p.trail_seed,
+                p.last_target_pos
+            )
+        })
+        .collect()
+}

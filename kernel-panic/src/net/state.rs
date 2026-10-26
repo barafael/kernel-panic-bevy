@@ -507,6 +507,8 @@ pub fn describe(world: &mut World) -> Vec<String> {
             out.push(format!("#{:06} ~ mover {mover:?} path {path:?}", id.0));
         }
     }
+    // The projectiles in flight, after the units once sorted.
+    out.extend(crate::units::weapon_fx::describe_projectiles(world));
     out.sort();
     // Query iteration order, as unit ids (deterministic), with each
     // unit's archetype: what canonical sorts guard against.

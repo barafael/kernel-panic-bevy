@@ -30,7 +30,11 @@ ls -la /Library/Apple/usr/libexec/oah/ 2>/dev/null || true
 for i in $(seq 1 "$runs"); do
   echo "::group::run $i"
   t0=$SECONDS
-  arch -x86_64 "$bin" --replay "${logs[@]}" --trail-dir "$out/run-$i"
+  # `--expect-trail`: the first tick whose hash differs from the
+  # reference's dumps its units and the previous tick's, whatever tick
+  # that turns out to be.
+  arch -x86_64 "$bin" --replay "${logs[@]}" --trail-dir "$out/run-$i" \
+    --expect-trail "$ref" --dump-dir "$out/run-$i"
   echo "run $i took $((SECONDS - t0)) s"
   echo "::endgroup::"
 done
@@ -62,21 +66,7 @@ for i in $(seq 1 "$runs"); do
   done
 done
 
-# 3. Dumps at the earliest diverging tick of each log, replayed until a
-# run reproduces it (macOS's own bash is 3.2: no associative arrays).
-sort -k1,1 -k2,2n "$out/divergences" | awk '!seen[$1]++' | while read -r stem t; do
-  log="$golden/$stem.kpreplay"
-  from=$(( t > 2 ? t - 2 : 1 ))
-  for k in 1 2 3 4 5; do
-    dir="$out/dump-$stem-$k"
-    echo "::group::dump $stem try $k: ticks $from..$t"
-    arch -x86_64 "$bin" --replay "$log" --ticks "$t" --trail-dir "$dir" --dump-at "$from,$((t-1)),$t" --dump-dir "$dir"
-    echo "::endgroup::"
-    if [ "$(sed -n "${t}p" "$dir/$stem.trail")" != "$(sed -n "${t}p" "$ref/$stem.trail")" ]; then
-      echo "dump $stem try $k: reproduced the divergence at tick $t"
-      break
-    fi
-    echo "dump $stem try $k: no divergence at tick $t this time"
-  done
-done
+# 3. The dumps `--expect-trail` wrote (the diverging tick and the one
+# before, per diverging log).
+ls -la "$out"/run-*/*.txt 2>/dev/null || echo "no dumps: no run diverged"
 exit $status
