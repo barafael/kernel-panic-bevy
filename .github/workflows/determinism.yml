@@ -244,7 +244,11 @@ jobs:
         # Web-to-web is expected identical (same wasm, bundled libm, strict
         # IEEE engines); native-to-web is the cross-play risk this proves.
         runtime: [node, chromium, firefox, webkit]
-    runs-on: ubuntu-latest
+    # Pinned: `ubuntu-latest` is Ubuntu 26.04 since 2026-10-19, and
+    # Playwright 1.56 has no browser builds for it ("Playwright does not
+    # support firefox on ubuntu26.04-x64"). Back to latest once a
+    # Playwright release lists 26.04.
+    runs-on: ubuntu-24.04
     # A browser run takes 2-12 min; a hung one (WebKit once sat 4 h) would
     # otherwise hold every later main run in the concurrency queue.
     timeout-minutes: 30

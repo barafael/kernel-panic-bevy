@@ -74,7 +74,11 @@ jobs:
 
   browser:
     name: browser <-> native
-    runs-on: ubuntu-latest
+    # Pinned: `ubuntu-latest` is Ubuntu 26.04 since 2026-10-19, and
+    # Playwright 1.56 has no browser builds for it ("Playwright does not
+    # support chromium on ubuntu26.04-x64"). Back to latest once a
+    # Playwright release lists 26.04.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/linux-deps

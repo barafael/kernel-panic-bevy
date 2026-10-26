@@ -48,6 +48,30 @@ fn lobby<R>(app: &mut App, f: impl FnOnce(&mut super::lobby::Lobby) -> R) -> R {
         .expect("in a room"))
 }
 
+/// The host's start blocker once no map read is in flight: its own
+/// (`reading map …`, a task on the IO pool since the hash left the
+/// frame) or a member's (`checking …'s map…`). A handful of frames is
+/// enough on a fast machine and not on a CI runner, so this runs frames
+/// until the read lands rather than counting them.
+fn blocker_after_maps(apps: &mut [App], host: usize) -> Option<String> {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let blocker = lobby(&mut apps[host], |l| l.start_blocker());
+        let reading = blocker
+            .as_deref()
+            .is_some_and(|b| b.starts_with("reading map") || b.starts_with("checking "));
+        if !reading {
+            return blocker;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the map read never finished: {blocker:?}"
+        );
+        frames(apps, 1);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
 /// The match's ticks of an app: the last `applied` of its hash log
 /// (the demo's ticks before the swap come first).
 fn trail(app: &mut App) -> Vec<u64> {
@@ -108,7 +132,7 @@ fn two_apps_meet_start_and_agree() {
     frames(&mut apps, 3);
     act(&mut apps[guest], LobbyAction::Ready(true));
     frames(&mut apps, 3);
-    assert_eq!(lobby(&mut apps[host], |l| l.start_blocker()), None);
+    assert_eq!(blocker_after_maps(&mut apps, host), None);
     let room_at_start = lobby(&mut apps[host], |l| l.room().cloned()).expect("a room");
     act(&mut apps[host], LobbyAction::Start);
 
@@ -247,7 +271,7 @@ fn two_apps_meet_start_and_agree() {
     assert_eq!(back.seats, room_at_start.seats, "the seats as they were");
     assert_eq!(back.members.len(), 2);
     assert_eq!(
-        lobby(&mut apps[host], |l| l.start_blocker()),
+        blocker_after_maps(&mut apps, host),
         Some(format!(
             "waiting for {} to be ready",
             back.member(ids[guest]).unwrap().name
@@ -263,5 +287,5 @@ fn two_apps_meet_start_and_agree() {
         let last = log.lines.back().map(|(_, l)| l.text.as_str());
         assert_eq!(last, Some("gg"));
     }
-    assert_eq!(lobby(&mut apps[host], |l| l.start_blocker()), None);
+    assert_eq!(blocker_after_maps(&mut apps, host), None);
 }
