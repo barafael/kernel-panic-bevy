@@ -223,7 +223,8 @@ pub(super) fn tick_weapon_fx(
         // carries the `beamdecay` intensity so the cached material is
         // never cloned per beam.
         let color = [intensity, intensity, intensity, 1.0];
-        draw.batches.push_flat_quad(
+        let u = beam.tiles;
+        draw.batches.push_quad(
             &beam.material,
             [
                 beam.end - offset,
@@ -231,7 +232,8 @@ pub(super) fn tick_weapon_fx(
                 beam.start + offset,
                 beam.end + offset,
             ],
-            color,
+            [[0.0, 0.0], [u, 0.0], [u, 1.0], [0.0, 1.0]],
+            [color; 4],
         );
         // `BeamLaserProjectile::Draw` with `texture2`: a cap of the
         // ribbon's own half-width at each end, the outer half of the

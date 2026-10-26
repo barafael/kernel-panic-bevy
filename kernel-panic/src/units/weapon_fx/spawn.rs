@@ -464,7 +464,7 @@ fn spawn_ground_flash(
         .clone();
 
     let color = tdf_color(rgb);
-    let material = cache.get_or_create_tiled(color, true, 2.0, None, 0, materials);
+    let material = cache.get_or_create_textured(color, true, 2.0, None, materials);
 
     // Clamp so even mines / SIGTERM don't swallow the screen, but keep
     // beam pings (AoE=8) readable. Small ring radius feels snappier than
@@ -585,6 +585,29 @@ fn tga_filename<'a>(name: &str, buf: &'a mut [u8]) -> Cow<'a, str> {
     Cow::Owned(format!("{name}.tga"))
 }
 
+/// Decode and upload every texture a shot can draw — each weapon's beam
+/// textures ([`beam_texture_names`]), the BeamLaser `flare` and the CEG
+/// atlas — so the first shot of a kind doesn't do it mid-fight
+/// (`rendering::prewarm`). Each is cached for the app's life.
+pub(crate) fn warm_shot_textures(
+    weapons: &WeaponRegistry,
+    model_cache: &mut S3OModelCache,
+    images: &mut Assets<Image>,
+) {
+    use strum::VariantArray;
+    for &kind in WeaponKind::VARIANTS {
+        if let Some(def) = weapons.get(kind) {
+            let (tex1, tex2) = beam_texture_names(def);
+            beam_texture(tex1, model_cache, images);
+            beam_texture(tex2, model_cache, images);
+        }
+    }
+    beam_texture("flare", model_cache, images);
+    for texture in crate::units::content::ceg_def::CegTexture::VARIANTS {
+        load_beam_texture(texture.file(), model_cache, images);
+    }
+}
+
 /// The beam atlas a weapon draws with: its authored `texture1`/`texture2`,
 /// or the engine's defaults for the category when the TDF leaves them
 /// empty (`ProjectileDrawer::LoadWeaponTextures`: `laserfalloff` body and
@@ -686,22 +709,21 @@ fn spawn_textured_beam(
     let has_texture = texture.is_some();
     // The engine's `laserfalloff` is a cross-beam gradient, constant
     // along the length: drawn once, not tiled like a glyph strip.
-    let tile_count = if has_texture && !tex1.eq_ignore_ascii_case("laserfalloff") {
-        ((length / ARROW_TILE_LENGTH).round() as u32).clamp(1, 24)
+    let tiles = if has_texture && !tex1.eq_ignore_ascii_case("laserfalloff") {
+        (length / ARROW_TILE_LENGTH).round().det_clamp(1.0, 24.0)
     } else {
-        0
+        1.0
     };
 
     // Outer (edge) pass. The beam entity is pure bookkeeping: the tick
     // system pushes its camera-facing quad into the batch for
     // `material` every frame (`super::batch`).
     let edge_color = weapon_edge_color(weapon);
-    let outer_mat = cache.get_or_create_tiled(
+    let outer_mat = cache.get_or_create_textured(
         edge_color,
         true,
         weapon.intensity,
         texture.as_ref().map(|(handle, _)| handle.clone()),
-        tile_count,
         materials,
     );
     // End caps (`texture2`) and, for a BeamLaser, the emitter flare
@@ -714,7 +736,7 @@ fn spawn_textured_beam(
                         cache: &mut BeamMaterialCache|
      -> Option<Handle<StandardMaterial>> {
         let (handle, _) = beam_texture(tex2, model_cache, images)?;
-        Some(cache.get_or_create_tiled(color, true, intensity, Some(handle), 0, materials))
+        Some(cache.get_or_create_textured(color, true, intensity, Some(handle), materials))
     };
     let flare_material = |color: bevy::color::LinearRgba,
                           intensity: f32,
@@ -729,7 +751,7 @@ fn spawn_textured_beam(
         let (handle, _) = beam_texture("flare", model_cache, images)?;
         let half = thickness * laser_flare_size(weapon);
         Some((
-            cache.get_or_create_tiled(color, true, intensity, Some(handle), 0, materials),
+            cache.get_or_create_textured(color, true, intensity, Some(handle), materials),
             half,
         ))
     };
@@ -740,6 +762,7 @@ fn spawn_textured_beam(
         lifetime,
         max_lifetime: lifetime,
         material: outer_mat,
+        tiles,
         decay: weapon.beam_decay,
         caps: cap_material(
             edge_color,
@@ -768,12 +791,11 @@ fn spawn_textured_beam(
     if core_ratio > 0.01 {
         let core_thickness = thickness * core_ratio;
         let core_color = weapon_core_color(weapon);
-        let core_mat = cache.get_or_create_tiled(
+        let core_mat = cache.get_or_create_textured(
             core_color,
             true,
             weapon.intensity.det_max(1.0),
             texture.map(|(handle, _)| handle),
-            tile_count,
             materials,
         );
         commands.spawn(BeamVisual {
@@ -783,6 +805,7 @@ fn spawn_textured_beam(
             lifetime,
             max_lifetime: lifetime,
             material: core_mat,
+            tiles,
             decay: weapon.beam_decay,
             caps: cap_material(
                 core_color,
@@ -848,19 +871,16 @@ fn spawn_laser_bolt(
 
     let (tex1, _) = beam_texture_names(weapon);
     let texture = beam_texture(tex1, model_cache, images);
-    let has_texture = texture.is_some();
-    let tile_count: u32 = if has_texture { 1 } else { 0 };
 
     // The bolt entity is pure bookkeeping: the tick system computes
     // the camera-facing corners each frame and pushes them into the
     // batch for `material` — world-space positions, no transform.
     let edge_color = weapon_edge_color(weapon);
-    let outer_mat = cache.get_or_create_tiled(
+    let outer_mat = cache.get_or_create_textured(
         edge_color,
         true,
         weapon.intensity,
         texture.as_ref().map(|(handle, _)| handle.clone()),
-        tile_count,
         materials,
     );
     // Optional endcaps from `texture2`. Upstream's `LaserProjectile::Draw`
@@ -901,12 +921,11 @@ fn spawn_laser_bolt(
     if core_ratio > 0.01 {
         let core_thickness = thickness * core_ratio;
         let core_color = weapon_core_color(weapon);
-        let core_mat = cache.get_or_create_tiled(
+        let core_mat = cache.get_or_create_textured(
             core_color,
             true,
             weapon.intensity.det_max(1.0),
             texture.map(|(handle, _)| handle),
-            tile_count,
             materials,
         );
         commands.spawn(LaserBolt {
@@ -1047,7 +1066,7 @@ fn spawn_projectile(
     // Route through the shared cache so projectiles that re-use the same
     // color + intensity share a single StandardMaterial handle instead of
     // minting a fresh one per shot.
-    let material = cache.get_or_create_tiled(color, false, weapon.intensity, None, 0, materials);
+    let material = cache.get_or_create_textured(color, false, weapon.intensity, None, materials);
 
     // Upstream weapons with `smoketrail=1` leave a smoke-trail ribbon
     // textured with the weapon's `texture2` (`pointertrail` /
@@ -1124,14 +1143,7 @@ fn bolt_cap_material(
     let (handle, _, _) = load_beam_texture(texture.file(), model_cache, images)?;
 
     // Keyed by the texture so different texture2 weapons don't collide.
-    Some(cache.get_or_create_tiled(
-        edge_color,
-        true,
-        weapon.intensity,
-        Some(handle),
-        0,
-        materials,
-    ))
+    Some(cache.get_or_create_textured(edge_color, true, weapon.intensity, Some(handle), materials))
 }
 
 /// Smoke-trail state for a projectile (upstream `CSmokeTrailProjectile`,
