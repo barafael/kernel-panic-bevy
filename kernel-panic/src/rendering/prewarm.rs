@@ -17,8 +17,8 @@
 //!   without them: the pipeline cache keeps what it was asked for.
 //! - **Unit and shot assets.** A unit kind's first spawn in an owner's
 //!   colour colours its texture pixel by pixel (`unit_material`) and
-//!   builds its piece meshes (`piece_layout`); a weapon's first shot
-//!   decodes its textures from the bundle. Both are cached for the
+//!   builds its piece meshes (`piece_layout`); the first shot of a
+//!   weapon they fire decodes its textures from the bundle. Both are cached for the
 //!   app's life, so the load does it once for every kind the seated
 //!   factions build.
 
@@ -108,6 +108,7 @@ struct PipelineWarmup(u8);
 /// the pipelines of [`VARIANTS`].
 pub fn warm_match(players: &[PlayerSpec], ctx: &mut SpawnContext) {
     let t0 = bevy::platform::time::Instant::now();
+    let mut fired = Vec::new();
     for (owner, player) in players.iter().enumerate() {
         let color = TeamColors::lookup(ctx.team_colors.as_deref(), owner as u8, player.faction);
         for &kind in UnitKind::VARIANTS
@@ -124,10 +125,14 @@ pub fn warm_match(players: &[PlayerSpec], ctx: &mut SpawnContext) {
                 model,
             );
             piece_layout(model, &mut ctx.meshes, &mut ctx.model_cache);
+            fired.extend(ctx.unit_registry.weapon(kind));
         }
     }
+    fired.sort_unstable();
+    fired.dedup();
     crate::units::weapon_fx::warm_shot_textures(
         &ctx.weapon_registry,
+        fired,
         &mut ctx.model_cache,
         &mut ctx.images,
     );

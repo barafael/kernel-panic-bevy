@@ -585,25 +585,38 @@ fn tga_filename<'a>(name: &str, buf: &'a mut [u8]) -> Cow<'a, str> {
     Cow::Owned(format!("{name}.tga"))
 }
 
-/// Decode and upload every texture a shot can draw — each weapon's beam
-/// textures ([`beam_texture_names`]), the BeamLaser `flare` and the CEG
-/// atlas — so the first shot of a kind doesn't do it mid-fight
-/// (`rendering::prewarm`). Each is cached for the app's life.
+/// Decode and upload every texture a shot can draw — the beam textures
+/// ([`beam_texture_names`]) of each of `fired` drawn as a beam or bolt,
+/// the BeamLaser `flare` and the CEG atlas — so the first shot of a kind
+/// doesn't do it mid-fight (`rendering::prewarm`). Each is cached for
+/// the app's life.
 pub(crate) fn warm_shot_textures(
     weapons: &WeaponRegistry,
+    fired: impl IntoIterator<Item = WeaponKind>,
     model_cache: &mut S3OModelCache,
     images: &mut Assets<Image>,
 ) {
+    use crate::units::content::ceg_def::CegTexture;
+    use spring_tdf::WeaponCategory::{BeamLaser, LaserCannon};
     use strum::VariantArray;
-    for &kind in WeaponKind::VARIANTS {
-        if let Some(def) = weapons.get(kind) {
+    for kind in fired {
+        // The shot's own dispatch: the Gauss arc, melee and projectiles
+        // draw no beam texture.
+        if let Some(def) = weapons.get(kind)
+            && matches!(def.category(), BeamLaser | LaserCannon)
+            && !weapons.is_gauss_cannon(kind)
+        {
             let (tex1, tex2) = beam_texture_names(def);
             beam_texture(tex1, model_cache, images);
             beam_texture(tex2, model_cache, images);
         }
     }
     beam_texture("flare", model_cache, images);
-    for texture in crate::units::content::ceg_def::CegTexture::VARIANTS {
+    // `bullet` is not in the bundle (`CegTexture::Bullet`).
+    for texture in CegTexture::VARIANTS
+        .iter()
+        .filter(|t| **t != CegTexture::Bullet)
+    {
         load_beam_texture(texture.file(), model_cache, images);
     }
 }
