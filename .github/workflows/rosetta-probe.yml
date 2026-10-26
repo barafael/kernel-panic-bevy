@@ -68,6 +68,14 @@ jobs:
       # pool threads: transform propagation, the path layers.)
       - name: Float probe on threads
         run: arch -x86_64 net-experiments/m0-floatprobe/target/x86_64-apple-darwin/release/floatprobe threads 8
+      # Run 40371194065's job 3 diverged at a tick whose unit dumps were
+      # identical to Linux's: the hash itself went wrong. It sorts byte
+      # records (libc memcmp); the x86_64 libSystem picks its memcmp /
+      # memcpy by cpuid, which Rosetta answers.
+      - name: What Rosetta advertises, and memcmp / memcpy / sort against scalar loops
+        run: |
+          arch -x86_64 sysctl -n machdep.cpu.brand_string machdep.cpu.features machdep.cpu.leaf7_features || true
+          arch -x86_64 net-experiments/m0-floatprobe/target/x86_64-apple-darwin/release/floatprobe memcmp 30000000
       - name: Reference trails
         env:
           GH_TOKEN: ${{ github.token }}

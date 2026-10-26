@@ -69,6 +69,121 @@ fn thread_report(name: &str) -> (String, Vec<u8>) {
     )
 }
 
+/// Byte-slice comparison, copying and sorting against scalar reference
+/// loops, at random lengths and alignments (`floatprobe memcmp`). The
+/// state hash sorts byte records (`net::state::Records::hash_sorted`),
+/// which is libc's `memcmp` under the hood; a Rosetta probe dump showed
+/// every hashed value identical to Linux while the hash differed, so
+/// the suspicion is the translated `memcmp` / `memcpy` of the x86_64
+/// libSystem (CPU-feature dispatched, alignment dependent).
+fn memcmp(iters: u64) -> ExitCode {
+    let mut s = 0x9E37_79B9_7F4A_7C15u64;
+    let mut rng = move || {
+        s ^= s << 13;
+        s ^= s >> 7;
+        s ^= s << 17;
+        s
+    };
+    let mut pool = vec![0u8; 1 << 16];
+    for b in &mut pool {
+        *b = rng() as u8;
+    }
+    let scalar_cmp = |a: &[u8], b: &[u8]| -> std::cmp::Ordering {
+        for (x, y) in a.iter().zip(b) {
+            if x != y {
+                return x.cmp(y);
+            }
+        }
+        a.len().cmp(&b.len())
+    };
+    let (mut bad_cmp, mut bad_eq, mut bad_copy, mut bad_sort) = (0u64, 0u64, 0u64, 0u64);
+    let mut shown = 0;
+    let mut buf_a = vec![0u8; 1024];
+    let mut buf_b = vec![0u8; 1024];
+    for i in 0..iters {
+        let r = rng();
+        let len = (r % 400) as usize;
+        let oa = ((r >> 16) % 64) as usize;
+        let ob = ((r >> 24) % 64) as usize;
+        let src = ((r >> 32) as usize) % (pool.len() - 512);
+        // b: a copy of a, with one byte changed at `p` (or none).
+        buf_a[oa..oa + len].copy_from_slice(&pool[src..src + len]);
+        buf_b[ob..ob + len].copy_from_slice(&pool[src..src + len]);
+        let p = ((r >> 40) % 512) as usize;
+        let lb = if (r >> 56) & 1 == 1 {
+            len.saturating_sub(((r >> 50) % 3) as usize)
+        } else {
+            len
+        };
+        if p < lb {
+            buf_b[ob + p] ^= 1 | ((r >> 8) as u8 & 0x80);
+        }
+        let a = &buf_a[oa..oa + len];
+        let b = &buf_b[ob..ob + lb];
+        // The copies landed intact?
+        if a.iter().zip(&pool[src..src + len]).any(|(x, y)| x != y) {
+            bad_copy += 1;
+        }
+        let want = scalar_cmp(a, b);
+        if a.cmp(b) != want {
+            bad_cmp += 1;
+            if shown < 5 {
+                shown += 1;
+                println!(
+                    "cmp mismatch at iter {i}: len {len} / {lb}, offsets {oa} / {ob}, flipped at {p}: got {:?}, scalar {:?}",
+                    a.cmp(b),
+                    want
+                );
+            }
+        }
+        if (a == b) != (want == std::cmp::Ordering::Equal) {
+            bad_eq += 1;
+        }
+    }
+    // Sorting records as the state hash does: ~400 records of ~35
+    // bytes that share long prefixes, in a buffer at a random offset.
+    for round in 0..(iters / 20_000).max(1) {
+        let r = rng();
+        let n = 300 + (r % 200) as usize;
+        let off = ((r >> 16) % 64) as usize;
+        let mut buf = vec![0u8; off];
+        let mut starts = Vec::with_capacity(n);
+        for k in 0..n {
+            starts.push(buf.len());
+            buf.extend((k as u32 / 3).to_le_bytes());
+            let x = rng();
+            buf.extend((x as u16).to_le_bytes());
+            buf.push((x >> 16) as u8);
+            for j in 0..7 {
+                buf.extend(((x >> (j * 8)) as f32 * 0.5).to_le_bytes());
+            }
+        }
+        let ends = starts.iter().skip(1).copied().chain([buf.len()]);
+        let recs: Vec<&[u8]> = starts.iter().zip(ends).map(|(&a, b)| &buf[a..b]).collect();
+        let mut fast = recs.clone();
+        fast.sort_unstable();
+        let mut slow = recs.clone();
+        slow.sort_by(|a, b| scalar_cmp(a, b));
+        if fast != slow {
+            bad_sort += 1;
+            if shown < 10 {
+                shown += 1;
+                println!("sort mismatch in round {round}: {n} records at offset {off}");
+            }
+        }
+    }
+    println!(
+        "{iters} comparisons: {bad_cmp} cmp mismatches, {bad_eq} eq mismatches, {bad_copy} bad copies; {bad_sort} sort mismatches"
+    );
+    if bad_cmp + bad_eq + bad_copy + bad_sort > 0 {
+        println!("FAIL: byte comparison, copying or sorting disagrees with the scalar loops");
+        ExitCode::FAILURE
+    } else {
+        println!("OK: memcmp / memcpy / sort agree with the scalar loops");
+        ExitCode::SUCCESS
+    }
+}
+
 fn threads(n: usize) -> ExitCode {
     let (main_line, main_bits) = thread_report("main");
     println!("{main_line}");
@@ -138,6 +253,11 @@ fn main() -> ExitCode {
             }
         }
         Some("threads") => threads(args.get(1).and_then(|n| n.parse().ok()).unwrap_or(8)),
+        Some("memcmp") => memcmp(
+            args.get(1)
+                .and_then(|n| n.parse().ok())
+                .unwrap_or(20_000_000),
+        ),
         _ => {
             eprintln!(
                 "usage: floatprobe run <out.bin> | floatprobe compare <a.bin> <b.bin> [...] | floatprobe threads [n]"

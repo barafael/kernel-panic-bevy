@@ -208,20 +208,50 @@ impl Records {
     /// The records in byte order, each hashed after its length.
     fn hash_sorted(&self) -> u64 {
         let ends = self.starts.iter().skip(1).copied().chain([self.buf.len()]);
-        let mut recs: Vec<&[u8]> = self
+        let unsorted: Vec<&[u8]> = self
             .starts
             .iter()
             .zip(ends)
             .map(|(&a, b)| &self.buf[a..b])
             .collect();
+        let mut recs = unsorted.clone();
         recs.sort_unstable();
-        let mut h = Fnv::default();
-        for r in recs {
-            h.bytes(&(r.len() as u32).to_le_bytes());
-            h.bytes(r);
+        let h = fnv_records(&recs);
+        // Self-check (the Rosetta probe): the same records sorted by a
+        // scalar byte loop instead of libc's memcmp, and hashed again.
+        // A probe dump showed every hashed value identical to Linux's
+        // while this hash differed, so the hash's own machinery is
+        // suspect: this says whether, and which half.
+        let mut slow = unsorted;
+        slow.sort_by(|a, b| {
+            for (x, y) in a.iter().zip(b.iter()) {
+                if x != y {
+                    return x.cmp(y);
+                }
+            }
+            a.len().cmp(&b.len())
+        });
+        if slow != recs {
+            eprintln!(
+                "state hash self-check: sort_unstable (memcmp) ordered {} records differently from the scalar sort",
+                recs.len()
+            );
         }
-        h.finish()
+        let h2 = fnv_records(&slow);
+        if h2 != h {
+            eprintln!("state hash self-check: {h:016x} (memcmp order) vs {h2:016x} (scalar order)");
+        }
+        h
     }
+}
+
+fn fnv_records(recs: &[&[u8]]) -> u64 {
+    let mut h = Fnv::default();
+    for r in recs {
+        h.bytes(&(r.len() as u32).to_le_bytes());
+        h.bytes(r);
+    }
+    h.finish()
 }
 
 /// [`category_ids`], kept until a component type is registered: the
