@@ -1099,6 +1099,11 @@ fn spawn_prepared_map(
         );
     }
 
+    // What the match would otherwise build on first use: the seats'
+    // units, the shots' textures, the effects' render pipelines. Last,
+    // so the match's own entities come first.
+    crate::rendering::prewarm::warm_match(&setup.players, &mut ctx);
+
     ctx.commands.insert_resource(heightmap);
     info!(
         "  world spawned in {:.0}ms (main thread)",

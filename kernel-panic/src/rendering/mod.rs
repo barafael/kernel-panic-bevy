@@ -1,5 +1,6 @@
 pub mod camera;
 pub mod interpolation;
+pub mod prewarm;
 pub mod settings;
 
 use bevy::prelude::*;
@@ -13,15 +14,18 @@ pub struct RenderingPlugin;
 
 impl Plugin for RenderingPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(interpolation::SimInterpolationPlugin)
-            .init_resource::<CameraSettings>()
-            .init_resource::<MapBounds>()
-            .init_resource::<settings::MsaaSupport>()
-            .add_systems(
-                Startup,
-                (settings::probe_msaa_support, spawn_camera).chain(),
-            )
-            .add_systems(Update, settings::apply_render_settings);
+        app.add_plugins((
+            interpolation::SimInterpolationPlugin,
+            prewarm::PrewarmPlugin,
+        ))
+        .init_resource::<CameraSettings>()
+        .init_resource::<MapBounds>()
+        .init_resource::<settings::MsaaSupport>()
+        .add_systems(
+            Startup,
+            (settings::probe_msaa_support, spawn_camera).chain(),
+        )
+        .add_systems(Update, settings::apply_render_settings);
         // F11 flips the mode the same frame it is applied and saved.
         #[cfg(not(target_arch = "wasm32"))]
         app.add_systems(
