@@ -93,12 +93,20 @@ fn count_asset_events(
     }
 }
 
+/// A frame this long (µs) gets a log line of its own.
+const LONG_FRAME_US: u32 = 100_000;
+
 fn frame_start(mut s: ResMut<Samples>) {
     let now = Instant::now();
     if let Some(started) = s.frame_started.replace(now) {
         let us = now.duration_since(started).as_micros() as u32;
         s.frames.push(us);
         s.worst_since_census = s.worst_since_census.max(us);
+        if us >= LONG_FRAME_US {
+            // On its own line, timestamped: a hitch placed against the
+            // log (a map load, a match start) without a tracing build.
+            info!("KP_PROFILE long frame {:.1}ms", us as f32 / 1000.0);
+        }
     }
     if s.ticks_this_frame > 1 {
         s.catch_up_frames += 1;
