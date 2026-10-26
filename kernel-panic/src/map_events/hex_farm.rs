@@ -30,7 +30,6 @@
 use crate::sim::{DetFloat, sq};
 use std::collections::{HashMap, HashSet};
 
-use bevy::camera::primitives::Aabb;
 use bevy::camera::visibility::NoFrustumCulling;
 use bevy::ecs::lifecycle::HookContext;
 use bevy::ecs::world::DeferredWorld;
@@ -40,7 +39,6 @@ use spring_map::hexfarm::{HexFarm, HexFarmEvent, Poly};
 use spring_map::lua_layout::HexFarmLayout;
 
 use crate::interaction::movement::NavGridSet;
-use crate::map_loading::TerrainChunkCoord;
 use crate::map_loading::lua_compositing::{
     HexDraw, QuadBuffer, Rgba, WHITE, atlas_material, minimap_pixels, push_hex, push_rect,
 };
@@ -49,7 +47,7 @@ use crate::rendering::camera::RtsCamera;
 use crate::sim::SQUARE_SIZE;
 use crate::terrain::geovent::{GeoventSmoker, spawn_smoker_at};
 use crate::terrain::heightmap::Heightmap;
-use crate::terrain::mesh::{CHUNK_SIZE, build_chunk};
+use crate::terrain::mesh::DirtyTerrainChunks;
 use crate::terrain::smooth_ground::SmoothGround;
 use crate::ui::minimap::MinimapState;
 use crate::units::combat::Dying;
@@ -349,8 +347,7 @@ fn hex_farm_sim(
     mut units: Query<(&mut Transform, &UnitType, &mut Health), Without<Dying>>,
     registry: Res<UnitRegistry>,
     smokers: Query<(Entity, &GeoventSmoker)>,
-    chunks: Query<(Entity, &TerrainChunkCoord, &Mesh3d)>,
-    mut meshes: ResMut<Assets<Mesh>>,
+    mut dirty_chunks: ResMut<DirtyTerrainChunks>,
     mut commands: Commands,
     // Full 400×400 repaint allocates ~640 KB and walks ~160 k polygon
     // lookups, and a busy tower sinking fires `Reshaped` several times
@@ -412,7 +409,6 @@ fn hex_farm_sim(
     if events.is_empty() {
         return;
     }
-    let mut touched_chunks: HashSet<(usize, usize)> = HashSet::new();
     let mut reshaped = false;
     for event in events {
         match event {
@@ -439,12 +435,7 @@ fn hex_farm_sim(
                     let vertices = [x0 as u32, z0 as u32, x1 as u32, z1 as u32];
                     reshape_nav(nav, &farm.terrain, farm.type_w, hm.heights(), hw, vertices);
                 }
-                // Vertices on a chunk seam belong to both chunks.
-                for cz in z0.saturating_sub(1) / CHUNK_SIZE..=z1 / CHUNK_SIZE {
-                    for cx in x0.saturating_sub(1) / CHUNK_SIZE..=x1 / CHUNK_SIZE {
-                        touched_chunks.insert((cx, cz));
-                    }
-                }
+                dirty_chunks.mark_vertices(x0, z0, x1, z1);
             }
             HexFarmEvent::VentAdded(k) => {
                 let h = &farm.hexes[k];
@@ -488,18 +479,6 @@ fn hex_farm_sim(
         }
     }
 
-    if let Some(hm) = heightmap.as_deref() {
-        let (hw, hh) = hm.grid_size();
-        for (e, coord, mesh) in &chunks {
-            if touched_chunks.contains(&(coord.0, coord.1))
-                && let Some(mut m) = meshes.get_mut(&mesh.0)
-            {
-                *m = build_chunk(hm.heights(), hw, hh, coord.0, coord.1).mesh;
-                // Recomputed from the new mesh (ray-cast culling).
-                commands.entity(e).remove::<Aabb>();
-            }
-        }
-    }
     if reshaped {
         *minimap_pending = true;
     }

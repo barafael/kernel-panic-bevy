@@ -12,16 +12,12 @@
 //!
 //! Inert unless the map loader inserted [`ShiftingTerrain`].
 
-use std::collections::HashSet;
-
-use bevy::camera::primitives::Aabb;
 use bevy::prelude::*;
 use spring_map::shifting::Shifting;
 
 use crate::interaction::movement::NavGridSet;
-use crate::map_loading::TerrainChunkCoord;
 use crate::terrain::heightmap::Heightmap;
-use crate::terrain::mesh::{CHUNK_SIZE, build_chunk};
+use crate::terrain::mesh::DirtyTerrainChunks;
 use crate::terrain::smooth_ground::SmoothGround;
 use crate::units::combat::Dying;
 use crate::units::components::{Health, UnitType};
@@ -86,9 +82,7 @@ fn shifting_sim(
     mut smooth_ground: Option<ResMut<SmoothGround>>,
     mut units: Query<(&mut Transform, &UnitType, &mut Health), Without<Dying>>,
     registry: Res<UnitRegistry>,
-    chunks: Query<(Entity, &TerrainChunkCoord, &Mesh3d)>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut commands: Commands,
+    mut dirty_chunks: ResMut<DirtyTerrainChunks>,
 ) {
     let state = &mut *state;
     state.frame += 1;
@@ -97,7 +91,6 @@ fn shifting_sim(
         return;
     };
 
-    let mut touched_chunks: HashSet<(usize, usize)> = HashSet::new();
     for k in 0..state.rules.blocks.len() {
         let level = (state.rules.level(frame, k) * LEVEL_STEPS).round() / LEVEL_STEPS;
         if level == state.written[k] {
@@ -128,24 +121,7 @@ fn shifting_sim(
             let [cx0, cz0, cx1, cz1] = cells.map(|c| c as i32);
             nav.bump([cx0 - h, cz0 - h, cx1 + h, cz1 + h]);
         }
-        // Vertices on a chunk seam belong to both chunks.
-        for cz in z0.saturating_sub(1) / CHUNK_SIZE..=z1 / CHUNK_SIZE {
-            for cx in x0.saturating_sub(1) / CHUNK_SIZE..=x1 / CHUNK_SIZE {
-                touched_chunks.insert((cx, cz));
-            }
-        }
-    }
-    if !touched_chunks.is_empty() {
-        let (hw, hh) = hm.grid_size();
-        for (e, coord, mesh) in &chunks {
-            if touched_chunks.contains(&(coord.0, coord.1))
-                && let Some(mut m) = meshes.get_mut(&mesh.0)
-            {
-                *m = build_chunk(hm.heights(), hw, hh, coord.0, coord.1).mesh;
-                // Recomputed from the new mesh (ray-cast culling).
-                commands.entity(e).remove::<Aabb>();
-            }
-        }
+        dirty_chunks.mark_vertices(x0, z0, x1, z1);
     }
 
     if !frame.is_multiple_of(SWEEP_INTERVAL) {

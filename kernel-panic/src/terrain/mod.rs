@@ -19,6 +19,7 @@ pub struct TerrainPlugin;
 impl Plugin for TerrainPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<GeoventAssets>()
+            .init_resource::<mesh::DirtyTerrainChunks>()
             .init_match_resource::<VentClaimReleaseTimer>()
             // Vent claims steer the AI's expansion (`ai_brain` skips
             // claimed vents): sim state, so they are reconciled on the
@@ -38,6 +39,7 @@ impl Plugin for TerrainPlugin {
                 (
                     emit_geovent_smoke,
                     tick_geovent_smoke.after(emit_geovent_smoke),
+                    mesh::rebuild_dirty_chunks,
                 ),
             );
     }

@@ -52,6 +52,11 @@ const FRAME_LOOP_WRITES: &[(&str, &str, &str)] = &[
     ),
     ("", "GizmoStorage<", "debug drawing"),
     (
+        "rebuild_dirty_chunks",
+        "kernel_panic::terrain::mesh::DirtyTerrainChunks",
+        "the terrain chunks the tick reshaped, drained into their meshes; the sim never reads it",
+    ),
+    (
         "",
         "global_transform::GlobalTransform",
         "transform propagation; the sim reads `Transform` / `SimPose`",
