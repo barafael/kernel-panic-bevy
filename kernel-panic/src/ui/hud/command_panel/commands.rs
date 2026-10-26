@@ -411,15 +411,16 @@ pub(crate) fn unit_commands(unit: &UnitCmdState, capped: &[UnitKind]) -> Vec<Cmd
             "a",
         )),
         UnitKind::Bug => {
-            // Upstream's `D` arms Bombard first (`kp_hotkeys.lua` binds
-            // `dgun` before `deploy`); here `D` stays the instant Deploy
-            // and Bombard is the button.
+            // A deliberate divergence: upstream's `D` arms Bombard first
+            // (its action is `dgun`, which `kp_hotkeys.lua` binds before
+            // `deploy`); here `D` is the instant Deploy and `B` arms
+            // Bombard.
             out.push(CmdDesc::new(
                 CmdId::Bombard,
                 Targeted,
                 "Bombard",
                 "Transform into artillery and attack target\nTip: hold alt to just deploy in range",
-                "",
+                "b",
             ));
             out.push(CmdDesc::new(
                 CmdId::Deploy,
