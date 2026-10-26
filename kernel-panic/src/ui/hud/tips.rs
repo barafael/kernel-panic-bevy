@@ -23,7 +23,7 @@
 //! of Mainframe and Rock-Paper-Scissors modes, the Touhou side and the
 //! old Hacker units, none of which the remake has.
 
-use bevy::audio::{AudioPlayer, PlaybackSettings, Volume};
+use bevy::audio::{AudioPlayer, AudioSource, PlaybackSettings, Volume};
 use bevy::ecs::message::Messages;
 use bevy::input::InputSystems;
 use bevy::input::mouse::MouseWheel;
@@ -34,7 +34,6 @@ use bevy::prelude::*;
 use bevy::text::{FontSize, LineHeight};
 use bevy::window::PrimaryWindow;
 
-use crate::audio::Sfx;
 use crate::game_setup::{AppState, GameSetup};
 use crate::interaction::selection::Selected;
 use crate::map_loading::MatchScopeAppExt;
@@ -765,24 +764,29 @@ struct TipDispenser {
     font_size: Option<f32>,
 }
 
-/// The tip voice files, when the app plays audio. A line loads when it
-/// is picked, as an [`Sfx`]: decoded in an asset task, not by the main
-/// thread's audio system when it starts (an `AudioSource` parses its
-/// Vorbis headers there, a few ms each), and freed again once played
-/// rather than every line held as PCM for the whole run.
+/// The tip voice files, loaded when the app plays audio.
+///
+/// As `AudioSource`s, not decoded [`Sfx`](crate::audio::Sfx): loading
+/// a line as an `Sfx` when it was picked (and dropping it once played)
+/// stalled the frame its tip came up in for 0.4–1 s (`KP_PROFILE`,
+/// 2026-10), where the `AudioSource`'s header parse at play is a few
+/// ms once per tip; held as PCM, all 102 lines would be tens of MB.
 #[derive(Resource)]
-struct TipVoiceBank(AssetServer);
+struct TipVoiceBank(Vec<(u16, Handle<AudioSource>)>);
 
 impl TipVoiceBank {
-    fn get(&self, n: u16) -> Option<Handle<Sfx>> {
-        TIP_VOICES
-            .contains(&n)
-            .then(|| self.0.load(format!("sounds/tips/{n}.ogg")))
+    fn get(&self, n: u16) -> Option<&Handle<AudioSource>> {
+        self.0.iter().find(|(k, _)| *k == n).map(|(_, h)| h)
     }
 }
 
 fn load_tip_voices(mut commands: Commands, assets: Res<AssetServer>) {
-    commands.insert_resource(TipVoiceBank(assets.clone()));
+    commands.insert_resource(TipVoiceBank(
+        TIP_VOICES
+            .iter()
+            .map(|&n| (n, assets.load(format!("sounds/tips/{n}.ogg"))))
+            .collect(),
+    ));
 }
 
 /// The volume the click toggle restores ("Voice: ON") after muting.
@@ -868,10 +872,9 @@ fn play_voice(commands: &mut Commands, bank: Option<&TipVoiceBank>, n: u16, gain
     if gain <= 0.0 {
         return;
     }
-    // Bevy's player starts it once it has loaded.
     if let Some(handle) = bank.and_then(|b| b.get(n)) {
         commands.spawn((
-            AudioPlayer(handle),
+            AudioPlayer(handle.clone()),
             PlaybackSettings::DESPAWN.with_volume(Volume::Linear(gain)),
             TipVoice,
         ));
