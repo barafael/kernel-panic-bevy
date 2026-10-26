@@ -287,8 +287,8 @@ pub fn update_cloak_visibility(
 const CLOAK_FADE_ALPHA: f32 = 0.5;
 
 /// Swap records produced by [`install_cloak_fade_materials`]: each
-/// model piece wears a per-unit `StandardMaterial` clone with alpha
-/// ramped down to [`CLOAK_FADE_ALPHA`]. On de-cloak
+/// model piece wears the shared `FadeMaterialCache` variant of its
+/// material at [`CLOAK_FADE_ALPHA`]. On de-cloak
 /// ([`restore_cloak_fade_materials`]) the original handles are
 /// re-installed so the unit pops back to fully opaque.
 #[derive(Component)]
@@ -297,19 +297,19 @@ pub struct CloakFadeMaterials {
     pub(crate) overrides: Vec<(Entity, Handle<StandardMaterial>)>,
 }
 
-/// Give friendly cloaked units a half-alpha clone of their model
+/// Give friendly cloaked units the half-alpha variant of their model
 /// material ([`ModelMaterials::fade`]). Enemy cloaked units are either
 /// hidden entirely or revealed at full opacity (detector reveal), so
 /// they skip this pass.
 ///
 /// Waits out a running emerge fade (`FadeMaterials` /
 /// `PendingFadeInstall`): both swap the same piece materials, and
-/// whichever restored second would have put the other's clone back for
-/// good — a Worm or Logic Bomb leaving its factory would have ended up
+/// whichever restored second would have put the other's variant back
+/// for good — a Worm or Logic Bomb leaving its factory would have ended up
 /// opaque while cloaked, or translucent forever. Not keyed on
 /// `Added<Cloaked>` for the same reason: a unit cloaked while emerging
 /// gets its cloak look as soon as the emerge fade is done. A Worm
-/// re-cloaks after every bite, which makes one fresh clone per cycle.
+/// re-cloaks after every bite and wears the same shared variant again.
 #[allow(clippy::type_complexity)]
 pub fn install_cloak_fade_materials(
     mut commands: Commands,
@@ -333,12 +333,12 @@ pub fn install_cloak_fade_materials(
         if fog.0 && !alliances.friendly(team.0, player.0) {
             continue;
         }
-        let faded = model.fade(children, CLOAK_FADE_ALPHA, &mut commands);
+        let overrides = model.fade(children, CLOAK_FADE_ALPHA, &mut commands);
         // Inserted even when nothing was swapped (a unit without model
         // pieces), so the unit isn't re-walked every tick.
-        commands.entity(entity).insert(CloakFadeMaterials {
-            overrides: faded.overrides,
-        });
+        commands
+            .entity(entity)
+            .insert(CloakFadeMaterials { overrides });
     }
 }
 
@@ -598,6 +598,7 @@ mod tests {
     fn world_with_cloaked_unit() -> (World, Entity, Entity, Handle<StandardMaterial>) {
         let mut world = World::new();
         world.init_resource::<Assets<StandardMaterial>>();
+        world.init_resource::<crate::units::assets::model_fade::FadeMaterialCache>();
         world.insert_resource(FogEnabled(false));
         world.insert_resource(LocalTeam(0));
         world.init_resource::<Alliances>();
@@ -631,7 +632,7 @@ mod tests {
     fn cloak_fade_waits_for_emerge_and_restores_on_decloak() {
         let (mut world, unit, piece, shared) = world_with_cloaked_unit();
         world.entity_mut(unit).insert(FadeMaterials {
-            faded: Vec::new(),
+            step: 0,
             overrides: Vec::new(),
         });
         world.run_system_once(install_cloak_fade_materials).unwrap();

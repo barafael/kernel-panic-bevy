@@ -993,10 +993,9 @@ pub fn animate_connection_hatch(
 }
 
 /// Run after `production_system`: for each entity tagged
-/// `PendingFadeInstall`, give its model pieces a per-unit alpha=0 clone
-/// of their shared material ([`ModelMaterials::fade`](crate::units::assets::model_fade::ModelMaterials::fade):
-/// one clone per unit, not per piece — nanoframes live for the whole
-/// build and the clone is re-uploaded every tick of it) and install a
+/// `PendingFadeInstall`, dress its model pieces in the alpha=0 variant
+/// of their shared material ([`ModelMaterials::fade`](crate::units::assets::model_fade::ModelMaterials::fade),
+/// shared by every unit fading at that step) and install a
 /// `FadeMaterials` component holding the swap records so
 /// `emerge_system` can both fade them in and revert them when emergence
 /// completes.
@@ -1006,13 +1005,10 @@ pub fn install_fade_materials(
     mut model: crate::units::assets::model_fade::ModelMaterials,
 ) {
     for (entity, children) in &pending {
-        let faded = model.fade(children, 0.0, &mut commands);
+        let overrides = model.fade(children, 0.0, &mut commands);
         commands
             .entity(entity)
-            .insert(FadeMaterials {
-                faded: faded.faded,
-                overrides: faded.overrides,
-            })
+            .insert(FadeMaterials { step: 0, overrides })
             .remove::<PendingFadeInstall>();
     }
 }

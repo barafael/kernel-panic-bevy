@@ -77,6 +77,7 @@ impl Plugin for UnitsPlugin {
             // the sim (`game_over::announce_outcome`).
             .init_state::<game_over::GameState>()
             .init_resource::<assets::meshes::S3OModelCache>()
+            .init_resource::<assets::model_fade::FadeMaterialCache>()
             .insert_resource(player::LocalTeam(0))
             .init_match_resource::<ai::AiTicker>()
             // Set from the seats at every match swap (`begin_match`).
