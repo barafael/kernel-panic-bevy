@@ -34,12 +34,19 @@ env:
   # The push trigger has no inputs: main run 40338273605 (16c269d, the
   # sim code this branch carries) and four replays.
   REFERENCE_RUN: ${{ inputs.reference_run || '40338273605' }}
-  RUNS: ${{ inputs.runs || '4' }}
+  RUNS: ${{ inputs.runs || '1' }}
 
 jobs:
-  # Named as determinism.yml's job so rust-cache finds its cache.
+  # Named as determinism.yml's job so rust-cache finds its cache. Six
+  # jobs, one replay each: run 40349916942's four replays on one host
+  # all matched while main's runs of the same code diverged one in
+  # three, so the difference may be between hosts, not between runs.
   native:
-    name: rosetta probe
+    name: rosetta probe ${{ matrix.sample }}
+    strategy:
+      fail-fast: false
+      matrix:
+        sample: [1, 2, 3, 4, 5, 6]
     runs-on: macos-latest
     timeout-minutes: 120
     steps:
@@ -65,6 +72,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh run download "$REFERENCE_RUN" -R "${{ github.repository }}" -n trail-linux-x86_64-gnu -D reference
+      - name: Hash the binary
+        run: shasum -a 256 target/x86_64-apple-darwin/release/kernel-panic
       - name: Probe
         run: |
           bash .github/scripts/rosetta-probe.sh \
@@ -73,6 +82,6 @@ jobs:
       - uses: actions/upload-artifact@v7
         if: ${{ !cancelled() }}
         with:
-          name: rosetta-probe
+          name: rosetta-probe-${{ matrix.sample }}
           path: probe/
           if-no-files-found: error
