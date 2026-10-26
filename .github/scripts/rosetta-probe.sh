@@ -46,7 +46,9 @@ for i in $(seq 1 "$runs"); do
     if cmp -s "$r" "$trail"; then
       echo "run $i $name: same as the reference"
     else
-      line=$(cmp "$r" "$trail" | grep -o '[0-9]*$')
+      # `cmp` exits 1 on a difference: under `pipefail` + `-e` that
+      # ended run 40350317806's script right at its first divergence.
+      line=$(cmp "$r" "$trail" 2>&1 | grep -o '[0-9]*$' || true)
       n=$(diff "$r" "$trail" | grep -c '^<' || true)
       echo "::warning::run $i $name: diverges from the reference at tick $line ($n lines differ)"
       echo "  reference: $(sed -n "${line}p" "$r")"
@@ -55,7 +57,7 @@ for i in $(seq 1 "$runs"); do
       status=1
     fi
     if [ "$i" -gt 1 ] && ! cmp -s "$out/run-1/$name" "$trail"; then
-      echo "::warning::run $i $name: differs from run 1 at tick $(cmp "$out/run-1/$name" "$trail" | grep -o '[0-9]*$')"
+      echo "::warning::run $i $name: differs from run 1 at tick $(cmp "$out/run-1/$name" "$trail" 2>&1 | grep -o '[0-9]*$' || true)"
     fi
   done
 done
