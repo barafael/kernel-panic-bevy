@@ -51,8 +51,16 @@ jobs:
         with:
           key: replay-x86_64-apple-darwin
           save-if: false
-      - name: Build the replay binary
-        run: cargo build --release --locked -p kernel-panic --features replay --target x86_64-apple-darwin
+      - name: Build the replay binary and the float probe
+        run: |
+          cargo build --release --locked -p kernel-panic --features replay --target x86_64-apple-darwin
+          cd net-experiments/m0-floatprobe
+          cargo build --release --locked --target x86_64-apple-darwin
+      # Does a thread's float environment differ from the main thread's
+      # under Rosetta? (The replay's task pools run float work on
+      # pool threads: transform propagation, the path layers.)
+      - name: Float probe on threads
+        run: arch -x86_64 net-experiments/m0-floatprobe/target/x86_64-apple-darwin/release/floatprobe threads 8
       - name: Reference trails
         env:
           GH_TOKEN: ${{ github.token }}
