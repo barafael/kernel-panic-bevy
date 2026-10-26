@@ -1878,10 +1878,14 @@ impl Session {
         let end = h.next_cut.min(from.saturating_add(FILL_MAX)) as usize;
         let mut start = from as usize;
         let mut chunks: Vec<Vec<u8>> = Vec::new();
+        // Turns the last chunk held: the next one starts from twice as
+        // many, not from all that is left, or a busy history is encoded
+        // over and over on the way down.
+        let mut fit = end - start;
         while start < end {
             // Halve until it fits (a quiet minute fits in one). A single
             // turn too big for a message is not sent.
-            let mut n = end - start;
+            let mut n = fit.saturating_mul(2).min(end - start);
             loop {
                 let msg = Msg::Fill(TurnRun::of(&h.history[start..start + n]));
                 match wire::encode_if_fits(self.match_id, &msg) {
@@ -1895,6 +1899,7 @@ impl Session {
                 break;
             }
             start += n;
+            fit = n;
         }
         self.stats.gap_fills += 1;
         for bytes in chunks {
