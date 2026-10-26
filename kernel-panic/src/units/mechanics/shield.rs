@@ -20,6 +20,8 @@
 //! [`OnsMode`] is the runtime toggle; [`attach_shields`] is gated on
 //! it and stays a no-op for the default sandbox game.
 
+use std::collections::HashMap;
+
 use bevy::prelude::*;
 
 use crate::sim::DetFloat;
@@ -182,6 +184,50 @@ pub struct ShieldShell;
 pub struct ShieldShellAssets {
     mesh: Option<Handle<Mesh>>,
     texture: Option<Handle<Image>>,
+    /// The shell materials by tint step ([`SHELL_TINT_STEPS`]), shared
+    /// by every shell: a shell's tint follows its power by swapping
+    /// handles, never by writing a material (each write re-uploads the
+    /// material buffer, which a regenerating shield did every tick).
+    tints: HashMap<u8, Handle<StandardMaterial>>,
+}
+
+/// Tint steps between [`SHELL_COLOR_EMPTY`] and [`SHELL_COLOR_FULL`].
+const SHELL_TINT_STEPS: u8 = 32;
+
+impl ShieldShellAssets {
+    /// The shell material of tint step `step`, minted on first use.
+    fn tint(
+        &mut self,
+        step: u8,
+        materials: &mut Assets<StandardMaterial>,
+    ) -> Handle<StandardMaterial> {
+        let texture = self.texture.clone();
+        self.tints
+            .entry(step)
+            .or_insert_with(|| {
+                let ratio = f32::from(step) / f32::from(SHELL_TINT_STEPS);
+                let full = SHELL_COLOR_FULL.to_srgba();
+                let empty = SHELL_COLOR_EMPTY.to_srgba();
+                materials.add(StandardMaterial {
+                    base_color: Color::srgba(
+                        empty.red + (full.red - empty.red) * ratio,
+                        empty.green + (full.green - empty.green) * ratio,
+                        empty.blue + (full.blue - empty.blue) * ratio,
+                        empty.alpha + (full.alpha - empty.alpha) * ratio,
+                    ),
+                    base_color_texture: texture,
+                    unlit: true,
+                    alpha_mode: AlphaMode::Blend,
+                    // Double-sided: the camera looks at the dome from
+                    // outside, but units inside still see its inner
+                    // surface.
+                    cull_mode: None,
+                    uv_transform: bevy::math::Affine2::from_scale(Vec2::splat(SHELL_HEX_TILES)),
+                    ..default()
+                })
+            })
+            .clone()
+    }
 }
 
 /// How many times `hexgrid.tga` wraps the dome. Upstream tiles the
@@ -219,26 +265,11 @@ pub fn spawn_shield_shells(
         // visible hex-patterned repulsor, not a bare bubble. Falls
         // back to the flat tint when the upstream bitmap isn't on
         // disk (wasm bundle without assets).
-        let texture = match &assets.texture {
-            Some(handle) => Some(handle.clone()),
-            None => load_beam_texture("hexgrid.tga", &mut model_cache, &mut images).map(
-                |(handle, _, _)| {
-                    assets.texture = Some(handle.clone());
-                    handle
-                },
-            ),
-        };
-        let material = materials.add(StandardMaterial {
-            base_color: SHELL_COLOR_FULL,
-            base_color_texture: texture,
-            unlit: true,
-            alpha_mode: AlphaMode::Blend,
-            // Double-sided: the camera looks at the dome from outside,
-            // but units inside still see its inner surface.
-            cull_mode: None,
-            uv_transform: bevy::math::Affine2::from_scale(Vec2::splat(SHELL_HEX_TILES)),
-            ..default()
-        });
+        if assets.texture.is_none() {
+            assets.texture = load_beam_texture("hexgrid.tga", &mut model_cache, &mut images)
+                .map(|(handle, _, _)| handle);
+        }
+        let material = assets.tint(SHELL_TINT_STEPS, &mut materials);
         commands.entity(entity).with_children(|parent| {
             parent.spawn((
                 ShieldShell,
@@ -261,9 +292,10 @@ pub fn tick_shield_shells(
     shields: Query<(&ShieldState, &Children)>,
     mut shells: Query<(
         &ShieldShell,
-        &MeshMaterial3d<StandardMaterial>,
+        &mut MeshMaterial3d<StandardMaterial>,
         &mut Visibility,
     )>,
+    mut assets: ResMut<ShieldShellAssets>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     for (state, children) in &shields {
@@ -273,24 +305,16 @@ pub fn tick_shield_shells(
             (Some(max), Some(current)) if max > 0.0 => (current / max).det_clamp(0.0, 1.0),
             _ => 0.0,
         };
-        let full = SHELL_COLOR_FULL.to_srgba();
-        let empty = SHELL_COLOR_EMPTY.to_srgba();
-        let tinted = Color::srgba(
-            empty.red + (full.red - empty.red) * ratio,
-            empty.green + (full.green - empty.green) * ratio,
-            empty.blue + (full.blue - empty.blue) * ratio,
-            empty.alpha + (full.alpha - empty.alpha) * ratio,
+        let tint = assets.tint(
+            (ratio * f32::from(SHELL_TINT_STEPS)).round() as u8,
+            &mut materials,
         );
         for child in children {
-            let Ok((_, material, mut visibility)) = shells.get_mut(*child) else {
+            let Ok((_, mut material, mut visibility)) = shells.get_mut(*child) else {
                 continue;
             };
-            // A write marks the material modified (a GPU re-upload), so
-            // only write when the tint actually moved.
-            if let Some(mut mat) = materials.get_mut(&material.0)
-                && mat.base_color != tinted
-            {
-                mat.base_color = tinted;
+            if material.0 != tint {
+                material.0 = tint.clone();
             }
             visibility.set_if_neq(if ratio <= 0.0 {
                 Visibility::Hidden

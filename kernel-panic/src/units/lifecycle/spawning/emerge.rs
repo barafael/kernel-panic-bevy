@@ -4,7 +4,11 @@
 //! ticks it forward and removes the component when the animation
 //! completes.
 
+use crate::interaction::selection::highlight::Highlighted;
 use crate::sim::DetFloat;
+use crate::units::assets::model_fade::{
+    FadeMaterialCache, FadeOverrides, WornMaterials, fade_step, wear,
+};
 use bevy::prelude::*;
 
 /// Marks a freshly-built unit that hasn't finished emerging from its
@@ -37,8 +41,8 @@ pub struct Emerging {
 ///   COB `Create()` script also moving the `base` piece up via
 ///   `BUILD_PERCENT_LEFT`.
 /// - `Fade` — Hacker / Network units (Hole, Connection, Window, Port).
-///   Spawn at surface but materialize via an alpha ramp on a per-unit
-///   cloned material. Mirrors upstream's `lua_SetAlphaThreshold(255 → 0)`
+///   Spawn at surface but materialize via an alpha ramp through shared
+///   translucent variants of their material. Mirrors upstream's `lua_SetAlphaThreshold(255 → 0)`
 ///   pattern in bug.bos / packet.bos / connection.bos.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EmergeStyle {
@@ -57,21 +61,18 @@ pub struct BuildDriven {
     pub unpowered: f32,
 }
 
-/// Per-unit faded material clones plus the per-piece originals to put
-/// back when the entity finishes fading in. Spawned alongside
-/// `Emerging { Fade }` so the per-unit alpha ramp doesn't bleed into the
-/// shared faction-colored material.
+/// An emerge fade's state: the alpha step the unit's pieces wear
+/// (a shared [`FadeMaterialCache`] variant of their material) and the
+/// per-piece originals to put back when the entity finishes fading
+/// in. Spawned alongside `Emerging { Fade }`; the shared faction
+/// material itself is never touched.
 #[derive(Component)]
 pub struct FadeMaterials {
-    /// The faded clones `emerge_system` ramps — one per *distinct*
-    /// source material the unit's pieces used, shared by every piece
-    /// that used it. A unit's pieces all carry the same (model,
-    /// faction) material, so this is one handle: one clone and one
-    /// material write (re-upload) per tick per unit, not one per piece.
-    pub faded: Vec<Handle<StandardMaterial>>,
+    /// The [`fade_step`] the pieces wear.
+    pub step: u8,
     /// (piece_entity, original) — the shared material each piece gets
     /// back once the fade completes.
-    pub overrides: Vec<(Entity, Handle<StandardMaterial>)>,
+    pub overrides: FadeOverrides,
 }
 
 /// Tick `Emerging` units forward. A `Rise`-style unit stands at its
@@ -90,17 +91,18 @@ pub fn emerge_system(
         Entity,
         &mut Transform,
         &mut Emerging,
-        Option<&FadeMaterials>,
+        Option<&mut FadeMaterials>,
         Has<crate::interaction::movement::MoveTarget>,
         Option<&crate::interaction::movement::CommandQueue>,
         Has<BuildDriven>,
         Option<&crate::units::lifecycle::production::NewUnitOrders>,
     )>,
-    piece_mats: Query<&MeshMaterial3d<StandardMaterial>>,
+    mut worn: WornMaterials,
+    mut cache: ResMut<FadeMaterialCache>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     let dt = time.delta_secs();
-    for (entity, mut transform, mut emerging, fade, has_move, queue, driven, factory_orders) in
+    for (entity, mut transform, mut emerging, mut fade, has_move, queue, driven, factory_orders) in
         &mut q
     {
         if !driven {
@@ -117,11 +119,19 @@ pub fn emerge_system(
             }
             EmergeStyle::Fade => {
                 // Linear alpha ramp; pieces stay at surface y throughout.
-                if let Some(fade) = fade {
-                    for faded_handle in &fade.faded {
-                        if let Some(mut mat) = materials.get_mut(faded_handle) {
-                            mat.base_color = mat.base_color.with_alpha(t);
+                // A new step swaps the pieces to its shared variant.
+                if let Some(fade) = fade.as_deref_mut()
+                    && fade.step != fade_step(t)
+                {
+                    fade.step = fade_step(t);
+                    let mut highlighted = false;
+                    for (piece, original) in &fade.overrides {
+                        if let Some(variant) = cache.variant(original, fade.step, &mut materials) {
+                            highlighted |= wear(*piece, variant, &mut worn);
                         }
+                    }
+                    if highlighted {
+                        commands.entity(entity).try_remove::<Highlighted>();
                     }
                 }
             }
@@ -133,16 +143,15 @@ pub fn emerge_system(
             }
             // Restore the shared faction material on every piece we
             // overrode, so future asset swaps / faction recolors take
-            // effect on this unit too. With the pieces back on their
-            // originals and `FadeMaterials` gone, the faded clone's
-            // last strong handle drops and the asset is freed.
+            // effect on this unit too — and a hover highlight restores
+            // to it rather than to a fade variant.
             if let Some(fade) = fade {
-                for (piece_entity, original) in &fade.overrides {
-                    if piece_mats.get(*piece_entity).is_ok() {
-                        commands
-                            .entity(*piece_entity)
-                            .insert(MeshMaterial3d(original.clone()));
-                    }
+                let mut highlighted = false;
+                for (piece, original) in &fade.overrides {
+                    highlighted |= wear(*piece, original.clone(), &mut worn);
+                }
+                if highlighted {
+                    commands.entity(entity).try_remove::<Highlighted>();
                 }
                 commands.entity(entity).remove::<FadeMaterials>();
             }

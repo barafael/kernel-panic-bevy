@@ -16,6 +16,7 @@ pub use shared::{
     AttackEvent, BuildArcEvent, DelayedHitInfo, ExplosionEvent, ImpactEffect, PendingAttacks,
     PendingExplosions,
 };
+pub(crate) use spawn::warm_shot_textures;
 
 /// Live effect counts for the `KP_PROFILE` census.
 #[cfg(not(target_arch = "wasm32"))]

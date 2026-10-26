@@ -215,6 +215,10 @@ pub(super) struct BeamVisual {
     /// Cached beam material ([`BeamMaterialCache`]) the quad is
     /// batched under.
     pub material: Handle<StandardMaterial>,
+    /// How many times the texture repeats along the ribbon (in the
+    /// quad's U), so `arrow`'s `>>>>` reads as a row of glyphs; 1.0
+    /// draws it once.
+    pub tiles: f32,
     /// Per-sim-frame RGB multiplier from the weapon's `beamdecay`. Each
     /// tick the beam's vertex colors are scaled by this value raised to
     /// the elapsed-frames power, mirroring upstream
@@ -506,11 +510,6 @@ struct MaterialKey {
     /// material. Keyed by asset id rather than name so the per-shot
     /// lookup never allocates.
     texture: Option<AssetId<Image>>,
-    /// UV-tile count along the beam length, quantized to integer. Zero
-    /// means no tiling (untextured or 1× mapping). Different tile counts
-    /// get separate materials so `spawn_beam_laser` can pick a material
-    /// whose `uv_transform` matches the beam length.
-    tile_count: u32,
 }
 
 impl BeamMaterialCache {
@@ -520,24 +519,22 @@ impl BeamMaterialCache {
         additive: bool,
         materials: &mut Assets<StandardMaterial>,
     ) -> Handle<StandardMaterial> {
-        self.get_or_create_tiled(color, additive, 1.0, None, 0, materials)
+        self.get_or_create_textured(color, additive, 1.0, None, materials)
     }
 
-    /// Route into the tiled-material cache. `tile_count=0` means no
-    /// `uv_transform` scaling (1× — the texture is drawn once along the
-    /// beam, or no texture). Positive values scale the texture to repeat
-    /// `tile_count` times along the beam's V-axis, which Bevy's default
-    /// `Cuboid` UVs put along the rotated Z axis (i.e. the beam length).
+    /// Route into the textured-material cache. A beam that tiles its
+    /// texture along its length does it in its quad's UVs
+    /// ([`BeamVisual::tiles`]), not here: one material per weapon
+    /// texture, whatever the beam's length, so every beam of a weapon
+    /// lands in one batch and a new length never mints a material.
     /// Textures must have a Repeat address-mode sampler (see
     /// [`load_beam_texture`]) or tiling clamps to the last row.
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn get_or_create_tiled(
+    pub(super) fn get_or_create_textured(
         &mut self,
         color: LinearRgba,
         additive: bool,
         intensity: f32,
         texture: Option<Handle<Image>>,
-        tile_count: u32,
         materials: &mut Assets<StandardMaterial>,
     ) -> Handle<StandardMaterial> {
         let emissive_scale = (intensity.det_max(0.5) * 4.0).det_clamp(1.0, 40.0);
@@ -549,7 +546,6 @@ impl BeamMaterialCache {
             premultiplied: false,
             intensity: (emissive_scale * 2.0).round() as u8,
             texture: texture.as_ref().map(Handle::id),
-            tile_count,
         };
         self.entries
             .entry(key)
@@ -559,23 +555,12 @@ impl BeamMaterialCache {
                 } else {
                     AlphaMode::Blend
                 };
-                // The shared `beam_quad` mesh authors UVs so texture U
-                // runs along local +Z (beam length) and V across the
-                // perpendicular axis. Scaling U by `tile_count` tiles
-                // the atlas along the beam without any axis-swap
-                // arithmetic.
-                let uv_transform = if tile_count > 1 {
-                    bevy::math::Affine2::from_scale(Vec2::new(tile_count as f32, 1.0))
-                } else {
-                    bevy::math::Affine2::IDENTITY
-                };
                 materials.add(StandardMaterial {
                     base_color: Color::LinearRgba(color),
                     base_color_texture: texture,
                     emissive: color * emissive_scale,
                     unlit: true,
                     alpha_mode,
-                    uv_transform,
                     ..default()
                 })
             })
@@ -601,7 +586,6 @@ impl BeamMaterialCache {
             premultiplied: true,
             intensity: 0,
             texture: texture.as_ref().map(Handle::id),
-            tile_count: 0,
         };
         self.entries
             .entry(key)

@@ -19,7 +19,7 @@ use crate::interaction::selection::highlight::{Highlighted, OriginalMaterial};
 
 use super::assets::animation::PieceIndex;
 use super::assets::meshes::{S3OModelCache, unit_material};
-use super::assets::model_fade::ModelRoot;
+use super::assets::model_fade::{FadeMaterialCache, ModelRoot};
 use super::components::{Faction, TeamId, UnitType};
 use super::content::unit_registry::UnitRegistry;
 use super::lifecycle::spawning::FadeMaterials;
@@ -130,9 +130,10 @@ pub struct UnitColor(pub TeamColor);
 /// owner's colour, as Spring draws a unit in its current team's
 /// (`CUnit::ChangeTeam`). Every model node wearing the old shared
 /// material gets the new one, and what an emerge or cloak fade or a
-/// highlight puts back afterwards is the new one too; a fade's
-/// per-unit clone takes the new texture. Compares colours rather than
-/// watching `Changed<TeamId>`, so a unit taken mid-fade isn't missed.
+/// highlight puts back afterwards is the new one too; a fade variant
+/// turns into the new material's at the same step. Compares colours
+/// rather than watching `Changed<TeamId>`, so a unit taken mid-fade
+/// isn't missed.
 /// Writes components in place, so no unit changes archetype.
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub fn recolor_taken_units(
@@ -155,6 +156,7 @@ pub fn recolor_taken_units(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
     mut cache: ResMut<S3OModelCache>,
+    mut fades: ResMut<FadeMaterialCache>,
     mut commands: Commands,
 ) {
     for (entity, team, faction, kind, mut color, fade, cloak) in &mut units {
@@ -167,20 +169,16 @@ pub fn recolor_taken_units(
             |c: TeamColor| unit_material(kind.0, c, &mut materials, &mut images, &mut cache, model);
         let (old, new) = (material(color.0), material(want));
         color.0 = want;
-        let texture = |h: &Handle<StandardMaterial>, m: &Assets<StandardMaterial>| {
-            m.get(h).and_then(|m| m.base_color_texture.clone())
-        };
-        let (old_texture, new_texture) = (texture(&old, &materials), texture(&new, &materials));
-        // A per-unit clone of the old material (a fade's) draws the new
-        // texture.
+        // A fade's variant of the old material turns into the same
+        // step's variant of the new one.
         let mut repaint = |h: &mut Handle<StandardMaterial>| {
             if *h == old {
                 *h = new.clone();
-            } else if old_texture.is_some()
-                && texture(h, &materials) == old_texture
-                && let Some(mut clone) = materials.get_mut(&*h)
+            } else if let Some((source, step)) = fades.source_of(h)
+                && source == old
+                && let Some(variant) = fades.variant(&new, step, &mut materials)
             {
-                clone.base_color_texture.clone_from(&new_texture);
+                *h = variant;
             }
         };
         let swapped = fade
@@ -281,6 +279,7 @@ mod tests {
         world.init_resource::<Assets<StandardMaterial>>();
         world.init_resource::<Assets<Image>>();
         world.init_resource::<S3OModelCache>();
+        world.init_resource::<FadeMaterialCache>();
         world.insert_resource(UnitRegistry::load());
         let colors = TeamColors::from_factions([Network, Network]);
         world.insert_resource(colors.clone());
