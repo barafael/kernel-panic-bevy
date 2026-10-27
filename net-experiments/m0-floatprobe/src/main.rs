@@ -802,6 +802,141 @@ fn waypoints_probe(secs: u64, n: usize) -> ExitCode {
     }
 }
 
+/// One x86 flags window, as rustc lays out `Bits::f32`'s x lane
+/// (`floatprobe waypoints` binary, `waypoints::capture`): a `ucomiss`
+/// of a float with itself, `setp` keeping its parity flag (the NaN
+/// bit) in a register, a few flag-preserving moves, then `jp` on the
+/// same flags. On real hardware the two always agree. Returns (setp,
+/// jp taken) as 0 / 1 each.
+#[cfg(target_arch = "x86_64")]
+fn parity_window(x: f32) -> (u32, u32) {
+    let (a, b): (u32, u32);
+    // SAFETY: register-only arithmetic on a copy of `x`; no memory
+    // touched, stack untouched; the flags are clobbered (declared).
+    unsafe {
+        std::arch::asm!(
+            "ucomiss {x}, {x}",
+            "setp {a:l}",
+            "movzx {a:e}, {a:l}",
+            "movaps {t}, {x}",
+            "movaps {x}, {t}",
+            "mov {b:e}, 1",
+            "jp 2f",
+            "mov {b:e}, 0",
+            "2:",
+            x = inout(xmm_reg) x => _,
+            t = out(xmm_reg) _,
+            a = out(reg) a,
+            b = out(reg) b,
+            options(nostack, nomem, pure),
+        );
+    }
+    (a, b)
+}
+
+/// The same window on integer flags (`cmp`, `sete`, moves, `je`): is
+/// it the float compare's parity flag, or any flag?
+#[cfg(target_arch = "x86_64")]
+fn zero_window(x: u32) -> (u32, u32) {
+    let (a, b): (u32, u32);
+    // SAFETY: register-only; flags clobbered (declared).
+    unsafe {
+        std::arch::asm!(
+            "cmp {x:e}, 7",
+            "sete {a:l}",
+            "movzx {a:e}, {a:l}",
+            "mov {t:e}, {x:e}",
+            "mov {x:e}, {t:e}",
+            "mov {b:e}, 1",
+            "je 2f",
+            "mov {b:e}, 0",
+            "2:",
+            x = inout(reg) x => _,
+            t = out(reg) _,
+            a = out(reg) a,
+            b = out(reg) b,
+            options(nostack, nomem, pure),
+        );
+    }
+    (a, b)
+}
+
+/// `floatprobe parity <secs> <threads>`: [`parity_window`] and
+/// [`zero_window`] on never-NaN / never-7 inputs, continuously, counting
+/// every window whose two readings of one compare's flags disagree.
+#[cfg(target_arch = "x86_64")]
+fn parity_probe(secs: u64, n: usize) -> ExitCode {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    let faults = AtomicU64::new(0);
+    let windows = AtomicU64::new(0);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    std::thread::scope(|s| {
+        for t in 0..n {
+            let (faults, windows) = (&faults, &windows);
+            s.spawn(move || {
+                let mut x = 0x1234_5678_9abc_def0u64 ^ (t as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                let mut it = 0u64;
+                let mut local = 0u64;
+                while std::time::Instant::now() < deadline {
+                    for _ in 0..1_000_000u32 {
+                        x ^= x << 13;
+                        x ^= x >> 7;
+                        x ^= x << 17;
+                        // A finite float (the exponent field never all ones).
+                        let f = f32::from_bits((x as u32) & 0x7f7f_ffff);
+                        let (sp, jp) = parity_window(std::hint::black_box(f));
+                        if sp != jp {
+                            local += 1;
+                            println!(
+                                "FAULT on thread {t} iteration {it}: ucomiss {f:?} (bits {:08x}): setp {sp}, jp {jp}",
+                                f.to_bits()
+                            );
+                        }
+                        let v = (x >> 32) as u32 | 8;
+                        let (se, je) = zero_window(std::hint::black_box(v));
+                        if se != je {
+                            local += 1;
+                            println!("FAULT on thread {t} iteration {it}: cmp {v}: sete {se}, je {je}");
+                        }
+                        it += 1;
+                    }
+                    if it.is_multiple_of(16_000_000) {
+                        std::thread::yield_now();
+                    }
+                }
+                faults.fetch_add(local, Ordering::Relaxed);
+                windows.fetch_add(it, Ordering::Relaxed);
+            });
+        }
+        let mut elapsed = 0;
+        while std::time::Instant::now() < deadline {
+            std::thread::sleep(
+                std::time::Duration::from_secs(60).min(deadline - std::time::Instant::now()),
+            );
+            elapsed += 1;
+            println!("{elapsed} min");
+        }
+    });
+    let (f, w) = (
+        faults.load(Ordering::Relaxed),
+        windows.load(Ordering::Relaxed),
+    );
+    println!("{secs} s on {n} threads: {w} windows of each kind, {f} faults");
+    if f > 0 {
+        println!("FAIL: a compare's flags read differently by setcc and jcc");
+        ExitCode::FAILURE
+    } else {
+        println!("OK: every window agreed");
+        ExitCode::SUCCESS
+    }
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+fn parity_probe(_secs: u64, _n: usize) -> ExitCode {
+    println!("parity: x86_64 only");
+    ExitCode::SUCCESS
+}
+
 fn threads(n: usize) -> ExitCode {
     let (main_line, main_bits) = thread_report("main");
     println!("{main_line}");
@@ -877,6 +1012,10 @@ fn main() -> ExitCode {
                 .unwrap_or(20_000_000),
         ),
         Some("stress") => hash_stress(
+            args.get(1).and_then(|n| n.parse().ok()).unwrap_or(60),
+            args.get(2).and_then(|n| n.parse().ok()).unwrap_or(3),
+        ),
+        Some("parity") => parity_probe(
             args.get(1).and_then(|n| n.parse().ok()).unwrap_or(60),
             args.get(2).and_then(|n| n.parse().ok()).unwrap_or(3),
         ),

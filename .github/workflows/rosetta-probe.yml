@@ -134,8 +134,17 @@ jobs:
         run: |
           cd net-experiments/m0-floatprobe
           cargo build --release --locked --target x86_64-apple-darwin
-      - name: Capture the same data three times over, for 90 minutes on 3 threads
-        run: arch -x86_64 net-experiments/m0-floatprobe/target/x86_64-apple-darwin/release/floatprobe waypoints 5400 3
+      # Run 40542884297: one fault in 90 minutes, the same signature as
+      # the game's (a waypoint's x read as the canonical NaN, no NaN
+      # counted). rustc's x lane of `Bits::vec3` is `ucomiss`, `setp`
+      # (the counter), a few moves, `jp` (the bytes): one compare's
+      # flags read twice. `floatprobe parity` is that window alone, in
+      # asm, on floats that are never NaN, and the integer flags beside.
+      - name: One compare's flags read by setcc and by jcc, for 40 minutes on 3 threads
+        run: arch -x86_64 net-experiments/m0-floatprobe/target/x86_64-apple-darwin/release/floatprobe parity 2400 3
+      - name: Capture the same data three times over, for 50 minutes on 3 threads
+        if: ${{ !cancelled() }}
+        run: arch -x86_64 net-experiments/m0-floatprobe/target/x86_64-apple-darwin/release/floatprobe waypoints 3000 3
 
   # Earlier experiments, all clean, all gone from the matrix:
   # `floatprobe threads`, `memcmp`, `memcpy` (the libc routines and the
