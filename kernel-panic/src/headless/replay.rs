@@ -101,10 +101,10 @@ pub struct PlayOptions {
     pub ignore_compat: bool,
     /// 1-based ticks to also dump a readable per-unit state at.
     pub dump_at: Vec<usize>,
-    /// The sim hash of every tick as a reference trail has it: the first
+    /// Every tick's trail line as a reference trail has it: the first
     /// tick that differs dumps its state and the previous tick's
     /// ([`HashLog::expect`]). Empty: no check.
-    pub expect: Vec<u64>,
+    pub expect: Vec<String>,
     /// Every this many ticks (0: never), shuffle the ECS storage order
     /// of every sim entity ([`shuffle_storage`]): a native stand-in for
     /// another machine's archetype history.
@@ -268,27 +268,32 @@ pub fn shuffle_storage(world: &mut World, rng: &mut u32) {
 
 /// The trail: one line per tick, `<tick> <sim hash>` then the part
 /// hashes (positions, health, orders, projectiles), the unit and
-/// projectile counts and the NaN count, LF-terminated. Hashes are
-/// 16-digit lower-case hex.
+/// projectile counts, the NaN count and the hidden-state hash,
+/// LF-terminated. Hashes are 16-digit lower-case hex.
 pub fn trail_text(hashes: &[TickHash]) -> String {
-    use std::fmt::Write as _;
-    let mut out = String::with_capacity(hashes.len() * 100);
+    let mut out = String::with_capacity(hashes.len() * 120);
     for (i, h) in hashes.iter().enumerate() {
-        let _ = writeln!(
-            out,
-            "{} {:016x} {:016x} {:016x} {:016x} {:016x} {} {} {}",
-            i + 1,
-            h.sim,
-            h.parts[0],
-            h.parts[1],
-            h.parts[2],
-            h.parts[3],
-            h.units,
-            h.projectiles,
-            h.nans
-        );
+        out.push_str(&trail_line(i + 1, h));
+        out.push('\n');
     }
     out
+}
+
+/// One line of [`trail_text`] (no newline), for `tick` (1-based).
+pub fn trail_line(tick: usize, h: &TickHash) -> String {
+    format!(
+        "{} {:016x} {:016x} {:016x} {:016x} {:016x} {} {} {} {:016x}",
+        tick,
+        h.sim,
+        h.parts[0],
+        h.parts[1],
+        h.parts[2],
+        h.parts[3],
+        h.units,
+        h.projectiles,
+        h.nans,
+        h.hidden
+    )
 }
 
 /// The first line where two trails differ (1-based), if any.
@@ -435,12 +440,13 @@ mod tests {
             units: 7,
             projectiles: 8,
             nans: 0,
+            hidden: 10,
         };
         let t = trail_text(&[h, h]);
         assert_eq!(
             t.lines().nth(1).unwrap(),
             "2 0000000000000001 0000000000000003 0000000000000004 0000000000000005 \
-             0000000000000006 7 8 0"
+             0000000000000006 7 8 0 000000000000000a"
         );
         assert_eq!(first_difference(&t, &t), None);
         let mut other = h;

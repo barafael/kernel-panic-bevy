@@ -4,46 +4,72 @@ name: Rosetta probe
 # linux-x86_64-gnu` in determinism.yml (since 2026-10-21): replays the
 # golden logs under Rosetta 2, one process per log, all at once, for
 # several rounds per runner, compares every trail with a Linux
-# reference trail (the `trail-linux-x86_64-gnu` artifact of a main run
-# with the same sim code), and dumps the unit state and the hash's
-# exact input bytes at the first diverging tick
-# (.github/scripts/rosetta-probe.sh). Runs on every push of its own
-# branch (a workflow only on a branch cannot be dispatched: GitHub
-# registers workflows from the default branch) and by dispatch once it
-# is there.
+# reference trail made by this same run, and dumps the unit state and
+# the hashes' exact input bytes at the first diverging tick
+# (.github/scripts/rosetta-probe.sh). The trail on this branch carries
+# a hidden-state hash (movers, paths, build-site waits, the path
+# service: `net::state::Capture::hidden_hash`) main's trail has not, so
+# the reference must come from the branch's own code. Runs on every
+# push of its own branch (a workflow only on a branch cannot be
+# dispatched: GitHub registers workflows from the default branch) and by
+# dispatch once it is there.
 
 on:
   push:
     branches: [rosetta-probe]
   workflow_dispatch:
     inputs:
-      reference_run:
-        description: "Run id whose trail-linux-x86_64-gnu artifact is the reference"
-        required: true
       rounds:
         description: "Rounds of one process per log"
         default: "4"
 
 permissions:
   contents: read
-  actions: read
 
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
   GOLDEN_DIR: kernel-panic/tests/golden
-  # The push trigger has no inputs: main run 40338273605 (16c269d, the
-  # sim code this branch carries).
-  REFERENCE_RUN: ${{ inputs.reference_run || '40338273605' }}
   ROUNDS: ${{ inputs.rounds || '4' }}
 
 jobs:
+  # The reference: Linux, one process per log, all at once (Linux
+  # processes never differ from each other; determinism.yml's whole
+  # matrix agrees with them).
+  reference:
+    name: linux reference trails
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/linux-deps
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: replay-x86_64-unknown-linux-gnu
+          save-if: false
+      - name: Build the replay binary
+        run: cargo build --release --locked -p kernel-panic --features replay
+      - name: Replay every log
+        run: |
+          for log in "$GOLDEN_DIR"/*.kpreplay; do
+            target/release/kernel-panic --replay "$log" --trail-dir reference &
+          done
+          wait
+          ls -la reference
+      - uses: actions/upload-artifact@v7
+        with:
+          name: probe-reference
+          path: reference/
+          if-no-files-found: error
+
   # Named as determinism.yml's job so rust-cache finds its cache. The
   # fault is per process (the same binary passes and fails on one host),
   # about one process in ten to fifty: four runners, four rounds of four
   # processes each is 64 process samples a push.
   native:
     name: rosetta probe ${{ matrix.sample }}
+    needs: reference
     strategy:
       fail-fast: false
       matrix:
@@ -61,10 +87,10 @@ jobs:
           save-if: false
       - name: Build the replay binary
         run: cargo build --release --locked -p kernel-panic --features replay --target x86_64-apple-darwin
-      - name: Reference trails
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh run download "$REFERENCE_RUN" -R "${{ github.repository }}" -n trail-linux-x86_64-gnu -D reference
+      - uses: actions/download-artifact@v8
+        with:
+          name: probe-reference
+          path: reference
       - name: Hash the binary
         run: shasum -a 256 target/x86_64-apple-darwin/release/kernel-panic
       - name: Probe

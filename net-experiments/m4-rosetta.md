@@ -102,10 +102,42 @@ Either way the probe branch (`rosetta-probe`: six-to-ten single-replay jobs
 per push, each with `--expect-trail` dumps, the float, memcmp and memcpy
 probes, and the hash's own self-check) stays available for more samples.
 
+## 3b. Run 40482252987: the bytes differ, and it is the movement
+
+The first catch with `.records` dumps (job 3, round 3, Quad Core, tick
+3975, positions part, persisting): Linux re-hashes Rosetta's bytes to
+Rosetta's value, so the bytes differ and the hash was right. Exactly one
+record differs: unit #325, an Assembler of team 6, walking to a build
+site. At tick 3974 the two positions are still identical (the hash
+agrees), but the mover's hidden state is not: on Rosetta it had just
+had `start_moving` called again for the same goal (`last_repath_frame`
+3470 = the current frame, `prev_wp_dist` 0, a freshly searched path with
+`current: 1`), on Linux it was 10 waypoints into the path it had since
+frame 3093. The next tick Rosetta's unit turns hard (`turn_speed`
+−239.8, heading 3676 → 3437) and slows to 1.45, Linux's does not, and the
+positions part.
+
+`start_moving` fires when the mover's goal differs from its `MoveTarget`
+(`ground_move.rs`, orders → StartMoving). The target is hashed every
+tick (orders part) and never differed, so Rosetta's mover must have lost
+its goal (`stop_engine`, target removed) and regained it inside one
+tick, or earlier in bookkeeping the hash never saw. The root tick is
+earlier than 3974 and in state that was neither hashed nor dumped. §3's
+"wrong hash over identical state" reading was wrong: the unit dump that
+looked identical left out exactly this.
+
+So the trail now carries a tenth column, the hidden-state hash
+(`Capture::hidden_hash`): every mover's `GroundMover` and `MovePath`
+and `BuildSiteWait` as `Debug` text, and the path service's state
+(`PathQueue::describe`), keyed by `NetId`. Identical across processes
+and under the storage shuffle. Main's trail has no such column, so the
+probe workflow makes its own Linux reference first. The next catch
+names the first tick and the field.
+
 ## 6. Tools
 
 - `kernel-panic --replay … --expect-trail <dir> --dump-dir <d>`: dumps the
-  first tick whose sim hash misses `<dir>/<stem>.trail` and the tick before.
+  first tick whose trail line misses `<dir>/<stem>.trail` and the tick before.
   The dumps list projectiles now. Beside each `<stem>_<tick>.txt` comes
   `<stem>_<tick>.records`: the four part hashes' exact input bytes (the
   sorted records, one hex line each, under a `part <i> <hash>` line).

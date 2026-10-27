@@ -14,7 +14,7 @@
 //! `--replay` writes `<trail-dir>/<log stem>.trail` (default `trails/`)
 //! per log; `--dump-at` also writes readable unit dumps
 //! `<dump-dir>/<log stem>_<tick>.txt` for the bisect; `--expect-trail
-//! <dir>` compares every tick's sim hash with `<dir>/<log stem>.trail`
+//! <dir>` compares every tick's trail line with `<dir>/<log stem>.trail`
 //! as it goes and dumps the first differing tick and the one before
 //! (for a divergence whose tick is not known ahead). `--record-golden`
 //! records the golden logs ([`super::golden`]), all or the named ones,
@@ -122,6 +122,7 @@ fn replay_logs(args: &[String]) -> Result<(), String> {
     };
     let dump_dir = value(&values, "--dump-dir").map(PathBuf::from);
     std::fs::create_dir_all(&trail_dir).map_err(|e| format!("{}: {e}", trail_dir.display()))?;
+    let mut expect_text = None;
     for log in logs {
         let path = Path::new(log);
         let stem = path
@@ -131,18 +132,11 @@ fn replay_logs(args: &[String]) -> Result<(), String> {
         let bytes = std::fs::read(path).map_err(|e| format!("{log}: {e}"))?;
         let replay = Replay::decode(&bytes).map_err(|e| format!("{log}: {e}"))?;
         if let Some(dir) = &expect_dir {
-            // `<dir>/<stem>.trail`: the sim hash is the second column.
+            // `<dir>/<stem>.trail`, whole lines.
             let f = dir.join(format!("{stem}.trail"));
             let text = std::fs::read_to_string(&f).map_err(|e| format!("{}: {e}", f.display()))?;
-            options.expect = text
-                .lines()
-                .map(|l| {
-                    l.split(' ')
-                        .nth(1)
-                        .and_then(|h| u64::from_str_radix(h, 16).ok())
-                        .ok_or_else(|| format!("{}: not a trail line: {l}", f.display()))
-                })
-                .collect::<Result<_, _>>()?;
+            options.expect = text.lines().map(str::to_owned).collect();
+            expect_text = Some(text);
         }
         let mut map = MapInput::checkout(&replay.setup.map).map_err(|e| e.to_string())?;
         if switches.contains(&"--memory-assets") {
@@ -153,8 +147,8 @@ fn replay_logs(args: &[String]) -> Result<(), String> {
         let played = bevy::tasks::block_on(replay::play(&replay, map, &options))
             .map_err(|e| format!("{log}: {e}"))?;
         let out = trail_dir.join(format!("{stem}.trail"));
-        std::fs::write(&out, replay::trail_text(&played.hashes))
-            .map_err(|e| format!("{}: {e}", out.display()))?;
+        let trail = replay::trail_text(&played.hashes);
+        std::fs::write(&out, &trail).map_err(|e| format!("{}: {e}", out.display()))?;
         if let Some(dir) = &dump_dir {
             std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
             for (tick, lines) in &played.dumps {
@@ -171,22 +165,18 @@ fn replay_logs(args: &[String]) -> Result<(), String> {
         eprintln!("{}", replay::summary(&stem, &replay, &played));
         eprintln!("  trail: {}", out.display());
         if let Some(dir) = &expect_dir
-            && let Some(first) = options
-                .expect
-                .iter()
-                .zip(&played.hashes)
-                .position(|(e, h)| *e != h.sim)
+            && let Some(expected) = &expect_text
+            && let Some(line) = replay::first_difference(expected, &trail)
         {
             eprintln!(
-                "  diverges from {} at tick {}{}",
+                "  diverges from {} at tick {line}{}",
                 dir.join(format!("{stem}.trail")).display(),
-                first + 1,
                 dump_dir.as_ref().map_or(String::new(), |d| format!(
                     " (dumps of ticks {} and {} in {})",
-                    first.max(1),
-                    first + 1,
+                    (line - 1).max(1),
+                    line,
                     d.display()
-                ))
+                )),
             );
         }
     }

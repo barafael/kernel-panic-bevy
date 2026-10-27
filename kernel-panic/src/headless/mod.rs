@@ -173,12 +173,13 @@ pub struct HashLog {
     /// Ticks (1-based) at which to also dump a readable per-unit state.
     pub dump_at: Vec<usize>,
     pub dumps: Vec<(usize, Vec<String>)>,
-    /// The sim hash every tick is expected to have (a reference trail's):
-    /// the first tick whose hash differs dumps the state of that tick and
-    /// of the one before (every tick is described while this is set, so
-    /// the previous one is at hand). For a divergence that strikes at an
-    /// unpredictable tick (the Rosetta probe).
-    pub expect: Vec<u64>,
+    /// The trail line every tick is expected to produce (a reference
+    /// trail's, [`replay::trail_line`]): the first tick whose line
+    /// differs dumps the state of that tick and of the one before (every
+    /// tick is described while this is set, so the previous one is at
+    /// hand). For a divergence that strikes at an unpredictable tick
+    /// (the Rosetta probe).
+    pub expect: Vec<String>,
     /// The previous tick's description while `expect` is set.
     last_described: Option<(usize, Vec<String>)>,
     /// `expect` was missed once already: no further dumps.
@@ -202,6 +203,8 @@ pub struct TickHash {
     pub projectiles: u32,
     /// NaNs met while hashing (see [`state::Capture::nans`]).
     pub nans: u32,
+    /// See [`state::Capture::hidden_hash`].
+    pub hidden: u64,
 }
 
 fn log_hash(world: &mut World) {
@@ -224,7 +227,10 @@ fn log_hash(world: &mut World) {
     });
     for k in 0..repeat {
         let (again, again_streams) = state::capture_raw(world);
-        if again.sim_hash != c.sim_hash || again.part_hashes != c.part_hashes {
+        if again.sim_hash != c.sim_hash
+            || again.part_hashes != c.part_hashes
+            || again.hidden_hash != c.hidden_hash
+        {
             eprintln!(
                 "capture self-disagreement at tick {tick}, repeat {k}: sim {:016x} vs {:016x}, parts {:016x?} vs {:016x?}",
                 c.sim_hash, again.sim_hash, c.part_hashes, again.part_hashes
@@ -242,7 +248,18 @@ fn log_hash(world: &mut World) {
             }
         }
     }
-    let records = state::records_text(&streams, &c.part_hashes);
+    let th = TickHash {
+        sim: c.sim_hash,
+        fx: c.fx_hash,
+        parts: c.part_hashes,
+        units: c.units as u32,
+        projectiles: c.projectiles as u32,
+        nans: c.nans as u32,
+        hidden: c.hidden_hash,
+    };
+    let mut hashes = c.part_hashes.to_vec();
+    hashes.push(c.hidden_hash);
+    let records = state::records_text(&streams, &hashes);
     if world.resource::<HashLog>().dump_at.contains(&tick) {
         let lines = state::describe(world);
         let mut log = world.resource_mut::<HashLog>();
@@ -256,7 +273,7 @@ fn log_hash(world: &mut World) {
     if expecting {
         let lines = state::describe(world);
         let mut log = world.resource_mut::<HashLog>();
-        if log.expect[tick - 1] != c.sim_hash {
+        if log.expect[tick - 1] != replay::trail_line(tick, &th) {
             log.mismatched = true;
             if let Some(prev) = log.last_described.take() {
                 log.dumps.push(prev);
@@ -269,7 +286,7 @@ fn log_hash(world: &mut World) {
             // Right away, in the same process: do these bytes hash to
             // what the part hashes say? (`stream_hash` is the same FNV
             // over the same bytes by another loop.)
-            for (i, (s, h)) in streams.iter().zip(&c.part_hashes).enumerate() {
+            for (i, (s, h)) in streams.iter().zip(&hashes).enumerate() {
                 let again = state::stream_hash(s);
                 if again != *h {
                     eprintln!(
@@ -282,14 +299,7 @@ fn log_hash(world: &mut World) {
             log.last_records = Some((tick, records));
         }
     }
-    world.resource_mut::<HashLog>().ticks.push(TickHash {
-        sim: c.sim_hash,
-        fx: c.fx_hash,
-        parts: c.part_hashes,
-        units: c.units as u32,
-        projectiles: c.projectiles as u32,
-        nans: c.nans as u32,
-    });
+    world.resource_mut::<HashLog>().ticks.push(th);
 }
 
 /// The game app without a window or renderer, plugins finished, nothing

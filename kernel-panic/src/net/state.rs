@@ -11,13 +11,18 @@ use std::collections::{BTreeMap, HashMap};
 use bevy::ecs::component::ComponentId;
 use bevy::prelude::*;
 
-use crate::interaction::movement::{AttackMoveActive, CommandQueue, GuardTarget, MoveTarget};
+use crate::interaction::ground_move::{GroundMover, PathQueue};
+use crate::interaction::movement::{
+    AttackMoveActive, CommandQueue, GuardTarget, MovePath, MoveTarget,
+};
 use crate::net::NetId;
 use crate::rendering::interpolation::SimPose;
 use crate::units::combat::{AttackGroundOrder, AttackTargetOrder, Dying, Stunned};
 use crate::units::components::{Health, TeamId, UnitType};
 use crate::units::features::Feature;
-use crate::units::lifecycle::construction::{ClearOrder, Constructing, PendingBuild};
+use crate::units::lifecycle::construction::{
+    BuildSiteWait, ClearOrder, Constructing, PendingBuild,
+};
 use crate::units::lifecycle::production::Producer;
 use crate::units::lifecycle::spawning::Emerging;
 use crate::units::mechanics::cloak::Cloaked;
@@ -105,6 +110,12 @@ pub struct Capture {
     /// healthy sim has none.
     pub nans: usize,
     pub total_entities: usize,
+    /// Hash of the bookkeeping the sim hash leaves out (every mover's
+    /// full state, paths, build-site waits, the path service): not part
+    /// of `sim_hash`, a trail column of its own, so a divergence that
+    /// first shows in a position is caught where it was decided. The
+    /// Rosetta probe.
+    pub hidden_hash: u64,
 }
 
 type UnitQ = (
@@ -285,11 +296,13 @@ pub fn capture(world: &mut World) -> Capture {
     finish(&collect(world))
 }
 
-/// [`capture`], and the four part hashes' exact input bytes
-/// ([`Records::stream`]: positions, health, orders, projectiles).
-pub fn capture_raw(world: &mut World) -> (Capture, [Vec<u8>; 4]) {
+/// [`capture`], and the part hashes' exact input bytes
+/// ([`Records::stream`]: positions, health, orders, projectiles, then
+/// the hidden state).
+pub fn capture_raw(world: &mut World) -> (Capture, Vec<Vec<u8>>) {
     let c = collect(world);
-    let streams = c.recs.each_ref().map(Records::stream);
+    let mut streams: Vec<Vec<u8>> = c.recs.iter().map(Records::stream).collect();
+    streams.push(c.hidden.stream());
     (finish(&c), streams)
 }
 
@@ -303,7 +316,7 @@ pub fn stream_hash(stream: &[u8]) -> u64 {
 
 /// A dump of the four streams, readable and diffable: per part a
 /// `part <i> <hash>` line and one hex line per record.
-pub fn records_text(streams: &[Vec<u8>; 4], hashes: &[u64; 4]) -> Vec<String> {
+pub fn records_text(streams: &[Vec<u8>], hashes: &[u64]) -> Vec<String> {
     let mut out = Vec::new();
     for (i, (s, h)) in streams.iter().zip(hashes).enumerate() {
         out.push(format!("part {i} {h:016x}"));
@@ -349,6 +362,8 @@ pub fn check_records_text(text: &str) -> Vec<(usize, u64, u64)> {
 struct Collected {
     /// Positions, health / flags, orders, projectiles.
     recs: [Records; 4],
+    /// See [`Capture::hidden_hash`].
+    hidden: Records,
     census: BTreeMap<&'static str, usize>,
     units: usize,
     projectiles: usize,
@@ -525,6 +540,33 @@ fn collect(world: &mut World) -> Collected {
         hp_recs.start(me).extend(bits.f32(health.current));
     }
 
+    // --- hidden state ------------------------------------------------------
+    // Movement and construction bookkeeping, and the path service, as
+    // their `Debug` text (exact floats; no entity ids, which differ
+    // between machines): where a divergence that first shows in a
+    // position was decided.
+    let mut hidden = Records::default();
+    let name = |e: Entity| id_of.get(&e).map_or(u32::MAX, |id| id.0);
+    let mut hq = world.query::<(
+        &NetId,
+        Option<&GroundMover>,
+        Option<&MovePath>,
+        Option<&BuildSiteWait>,
+    )>();
+    for (id, mover, path, wait) in hq.iter(world) {
+        if mover.is_none() && path.is_none() && wait.is_none() {
+            continue;
+        }
+        hidden
+            .start(id.0.to_le_bytes())
+            .extend(format!("{mover:?}|{path:?}|{wait:?}").into_bytes());
+    }
+    if let Some(pq) = world.get_resource::<PathQueue>() {
+        hidden
+            .start(u32::MAX.to_le_bytes())
+            .extend(pq.describe(name).into_bytes());
+    }
+
     // --- projectiles -----------------------------------------------------
     let projectiles = projectile_entities.len();
     let mut proj_recs = Records::default();
@@ -539,6 +581,7 @@ fn collect(world: &mut World) -> Collected {
 
     Collected {
         recs: [pos_recs, hp_recs, order_recs, proj_recs],
+        hidden,
         census,
         units,
         projectiles,
@@ -573,6 +616,7 @@ fn finish(c: &Collected) -> Capture {
         part_hashes,
         nans: c.nans,
         total_entities: c.total_entities,
+        hidden_hash: c.hidden.hash_sorted(),
     }
 }
 
@@ -629,13 +673,26 @@ pub fn describe(world: &mut World) -> Vec<String> {
     // each, right after their unit's line once sorted.
     let mut mq = world.query::<(
         &NetId,
-        Option<&crate::interaction::ground_move::GroundMover>,
-        Option<&crate::interaction::movement::MovePath>,
+        Option<&GroundMover>,
+        Option<&MovePath>,
+        Option<&BuildSiteWait>,
     )>();
-    for (id, mover, path) in mq.iter(world) {
-        if mover.is_some() || path.is_some() {
-            out.push(format!("#{:06} ~ mover {mover:?} path {path:?}", id.0));
+    for (id, mover, path, wait) in mq.iter(world) {
+        if mover.is_some() || path.is_some() || wait.is_some() {
+            out.push(format!(
+                "#{:06} ~ mover {mover:?} path {path:?} wait {wait:?}",
+                id.0
+            ));
         }
+    }
+    // The path service, movers named by `NetId`.
+    let mut iq = world.query::<(Entity, &NetId)>();
+    let ids: HashMap<Entity, u32> = iq.iter(world).map(|(e, id)| (e, id.0)).collect();
+    if let Some(pq) = world.get_resource::<PathQueue>() {
+        out.push(format!(
+            "pathqueue {}",
+            pq.describe(|e| ids.get(&e).copied().unwrap_or(u32::MAX))
+        ));
     }
     // The projectiles in flight, after the units once sorted.
     out.extend(crate::units::weapon_fx::describe_projectiles(world));

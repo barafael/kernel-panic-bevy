@@ -314,6 +314,47 @@ pub struct PathQueue {
 }
 
 impl PathQueue {
+    /// The service's state, readable, movers named by `name` (their
+    /// `NetId`, never an entity id, which differs between machines);
+    /// maps and sets sorted. For the hidden-state hash and the dumps
+    /// (`net::state`).
+    pub fn describe(&self, name: impl Fn(Entity) -> u32) -> String {
+        let mut layers: Vec<(LayerKey, u64)> =
+            self.layers.iter().map(|(k, (r, _))| (*k, *r)).collect();
+        layers.sort_unstable();
+        let pending: Vec<u32> = self.pending.iter().map(|e| name(*e)).collect();
+        let mut queued: Vec<u32> = self.queued.iter().map(|e| name(*e)).collect();
+        queued.sort_unstable();
+        let in_flight = self.in_flight.as_ref().map(|f| {
+            (
+                name(f.entity),
+                f.layer,
+                f.revision,
+                f.share,
+                f.req.to,
+                f.req.goal_radius,
+            )
+        });
+        let mut shared: Vec<(ShareKey, u64, u32, bool)> = self
+            .shared
+            .iter()
+            .map(|(k, (r, e, p))| (*k, *r, name(*e), p.is_some()))
+            .collect();
+        shared.sort_unstable();
+        let mut repair_failed: Vec<u32> = self.repair_failed.iter().map(|e| name(*e)).collect();
+        repair_failed.sort_unstable();
+        let mut results: Vec<(u32, Vec2, bool)> = self
+            .results
+            .iter()
+            .map(|(e, (g, o))| (name(*e), *g, o.is_some()))
+            .collect();
+        results.sort_by_key(|r| r.0);
+        format!(
+            "epoch {} layers {layers:?} pending {pending:?} queued {queued:?} in_flight {in_flight:?} shared {shared:?} repair_failed {repair_failed:?} results {results:?}",
+            self.epoch
+        )
+    }
+
     /// The node layer of `req`'s class, current for `nav`'s revision.
     /// [`update_path_layers`] keeps every class current each tick; this
     /// catches up the class whose search was in flight then, and builds
