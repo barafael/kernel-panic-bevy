@@ -189,6 +189,9 @@ pub struct HashLog {
     pub records: Vec<(usize, Vec<String>)>,
     /// The previous tick's records text while `expect` is set.
     last_records: Option<(usize, Vec<String>)>,
+    /// Further dumps by name (`<stem>_<name>` files): the streams of a
+    /// capture self-disagreement, each capture's own.
+    pub extra: Vec<(String, Vec<String>)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -233,17 +236,54 @@ fn log_hash(world: &mut World) {
                 "capture self-disagreement at tick {tick}, repeat {k}: sim {:016x} vs {:016x}, parts {:016x?} vs {:016x?}",
                 c.sim_hash, again.sim_hash, c.part_hashes, again.part_hashes
             );
+            // Run 40516621326 job 2: twice in 16 processes the repeat
+            // read different bytes from the same world (positions once,
+            // the hidden state once), nothing else running. Where in
+            // the stream, at what alignment, and does a third read
+            // agree with the first or the second?
+            let (third, third_streams) = state::capture_raw(world);
             for (i, (a, b)) in streams.iter().zip(&again_streams).enumerate() {
                 let same = a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x == y);
+                let at = a.iter().zip(b).position(|(x, y)| x != y);
+                let t = &third_streams[i];
                 eprintln!(
-                    "  part {i}: bytes {} ({} vs {} bytes); FNV of the first capture's bytes now {:016x}, of the repeat's {:016x}",
+                    "  part {i}: bytes {} ({} vs {} bytes, first difference at {:?}; buffers at {:#x} and {:#x} mod 4096); FNV of the first capture's bytes now {:016x}, of the repeat's {:016x}; a third capture {}",
                     if same { "identical" } else { "DIFFER" },
                     a.len(),
                     b.len(),
+                    at,
+                    a.as_ptr() as usize % 4096,
+                    b.as_ptr() as usize % 4096,
                     state::stream_hash(a),
                     state::stream_hash(b),
+                    if t == a {
+                        "agrees with the first"
+                    } else if t == b {
+                        "agrees with the repeat"
+                    } else {
+                        "agrees with neither"
+                    },
                 );
             }
+            let mut hashes1 = c.part_hashes.to_vec();
+            hashes1.push(c.hidden_hash);
+            let mut hashes2 = again.part_hashes.to_vec();
+            hashes2.push(again.hidden_hash);
+            let mut hashes3 = third.part_hashes.to_vec();
+            hashes3.push(third.hidden_hash);
+            let mut log = world.resource_mut::<HashLog>();
+            log.extra.push((
+                format!("{tick}_self1.records"),
+                state::records_text(&streams, &hashes1),
+            ));
+            log.extra.push((
+                format!("{tick}_self2.records"),
+                state::records_text(&again_streams, &hashes2),
+            ));
+            log.extra.push((
+                format!("{tick}_self3.records"),
+                state::records_text(&third_streams, &hashes3),
+            ));
         }
     }
     let th = TickHash {

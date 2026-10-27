@@ -161,6 +161,11 @@ fn replay_logs(args: &[String]) -> Result<(), String> {
                 std::fs::write(&f, lines.join("\n"))
                     .map_err(|e| format!("{}: {e}", f.display()))?;
             }
+            for (name, lines) in &played.extra {
+                let f = dir.join(format!("{stem}_{name}"));
+                std::fs::write(&f, lines.join("\n"))
+                    .map_err(|e| format!("{}: {e}", f.display()))?;
+            }
         }
         eprintln!("{}", replay::summary(&stem, &replay, &played));
         eprintln!("  trail: {}", out.display());
