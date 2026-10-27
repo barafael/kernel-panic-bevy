@@ -26,9 +26,21 @@ sysctl hw.optional.arm 2>/dev/null | grep -i "afp\|ebf16\|i8mm" || true
 echo "arch: $(arch)"; file "$bin"
 ls -la /Library/Apple/usr/libexec/oah/ 2>/dev/null || true
 
+# Rosetta translates a fresh binary ahead of time in the background
+# (`oahd`, cache under /var/db/oah) and runs it by JIT until that is
+# done: which path a replay took is told by whether an .aot file for
+# this binary exists before it starts and after it ends.
+aot_state() {
+  local n
+  n=$(sudo find /var/db/oah -name '*.aot' -newer "$bin" 2>/dev/null | wc -l | tr -d ' ')
+  echo "aot files newer than the binary: $n"
+  sudo find /var/db/oah -name '*.aot' -newer "$bin" -exec ls -la {} \; 2>/dev/null | head -5
+}
+
 # 1. Several replays of every log, one process per run as determinism.yml runs it.
 for i in $(seq 1 "$runs"); do
   echo "::group::run $i"
+  echo "before run $i: $(aot_state)"
   t0=$SECONDS
   # `--expect-trail`: the first tick whose hash differs from the
   # reference's dumps its units and the previous tick's, whatever tick
@@ -36,6 +48,7 @@ for i in $(seq 1 "$runs"); do
   arch -x86_64 "$bin" --replay "${logs[@]}" --trail-dir "$out/run-$i" \
     --expect-trail "$ref" --dump-dir "$out/run-$i"
   echo "run $i took $((SECONDS - t0)) s"
+  echo "after run $i: $(aot_state)"
   echo "::endgroup::"
 done
 
