@@ -487,6 +487,321 @@ fn hash_stress(secs: u64, n: usize) -> ExitCode {
     }
 }
 
+/// The shape of the fault (`floatprobe waypoints <secs> <threads>`).
+/// Probe run 40516621326 caught it three times in 64 processes: a tick's
+/// state captured twice in a row, nothing running in between, gave two
+/// different byte streams, and the difference was one `f32` of a path's
+/// waypoint list (index 11 both times it was dumped) read as the
+/// canonical NaN 0x7fc00000 by one capture and as its value by the
+/// other, with the capture's NaN counter at zero. The read goes
+/// `Vec<Vec3>` on the heap → [`Bits::f32`]'s `is_nan` branch →
+/// `Vec<u8>::extend` into a buffer that grows to ~800 KB. This does
+/// that, and nothing else, continuously: mover-like structs with a
+/// Debug text, a waypoint list and rectangles, captured twice back to
+/// back and compared byte for byte.
+mod waypoints {
+    use super::game_hash::Records;
+    use glam::Vec3;
+
+    /// The game's `net::state::Bits`, verbatim.
+    const CANONICAL_NAN: u32 = 0x7fc0_0000;
+    #[derive(Default)]
+    pub struct Bits {
+        pub nans: usize,
+    }
+    impl Bits {
+        pub fn f32(&mut self, x: f32) -> [u8; 4] {
+            if x.is_nan() {
+                self.nans += 1;
+                CANONICAL_NAN.to_le_bytes()
+            } else {
+                x.to_bits().to_le_bytes()
+            }
+        }
+        pub fn vec3(&mut self, v: Vec3) -> [u8; 12] {
+            let mut out = [0; 12];
+            out[0..4].copy_from_slice(&self.f32(v.x));
+            out[4..8].copy_from_slice(&self.f32(v.y));
+            out[8..12].copy_from_slice(&self.f32(v.z));
+            out
+        }
+    }
+
+    /// Enough of `GroundMover` for its Debug text to cost what the
+    /// game's does (the text is the only thing the fields are for).
+    #[derive(Clone)]
+    pub struct Mover {
+        pub heading: u16,
+        pub turn_speed: f32,
+        pub current_speed: f32,
+        pub goal: Option<glam::Vec2>,
+        pub goal_radius: f32,
+        pub waypoint_dir: glam::Vec2,
+        pub curr_wp_dist: f32,
+        pub prev_wp_dist: f32,
+        pub flags: [bool; 12],
+        pub frames: [u32; 4],
+        pub best: [f32; 2],
+        pub velocity: Vec3,
+        pub old_pos: Vec3,
+        pub frame: u32,
+    }
+
+    impl std::fmt::Debug for Mover {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("GroundMover")
+                .field("heading", &self.heading)
+                .field("turn_speed", &self.turn_speed)
+                .field("current_speed", &self.current_speed)
+                .field("goal", &self.goal)
+                .field("goal_radius", &self.goal_radius)
+                .field("waypoint_dir", &self.waypoint_dir)
+                .field("curr_wp_dist", &self.curr_wp_dist)
+                .field("prev_wp_dist", &self.prev_wp_dist)
+                .field("flags", &self.flags)
+                .field("frames", &self.frames)
+                .field("best", &self.best)
+                .field("velocity", &self.velocity)
+                .field("old_pos", &self.old_pos)
+                .field("frame", &self.frame)
+                .finish()
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct Path {
+        pub current: usize,
+        pub goal: Vec3,
+        pub reached_goal: bool,
+        pub revision: u64,
+        pub dirty_at: Option<u32>,
+        pub repath_at: Option<usize>,
+        pub clean_from: Option<usize>,
+    }
+
+    pub struct Unit {
+        pub id: u32,
+        pub pos: Vec3,
+        pub rot: [f32; 4],
+        pub mover: Mover,
+        pub path: Path,
+        pub waypoints: Vec<Vec3>,
+        pub rects: Vec<[i32; 4]>,
+    }
+
+    /// One capture: the positions part and the hidden part, as the
+    /// game builds them (`net::state::collect`), each as its stream.
+    pub fn capture(units: &[Unit]) -> (Vec<u8>, Vec<u8>, usize) {
+        let mut bits = Bits::default();
+        let mut pos = Records::default();
+        let mut hidden = Records::default();
+        for u in units {
+            let me = u.id.to_le_bytes();
+            let p = pos.start(me);
+            p.extend((u.id as u16 % 40).to_le_bytes());
+            p.push((u.id % 8) as u8);
+            p.extend(bits.vec3(u.pos));
+            for c in u.rot {
+                p.extend(bits.f32(c));
+            }
+            let h = hidden.start(me);
+            h.extend(format!("{:?}|", Some(&u.mover)).into_bytes());
+            h.extend(
+                format!(
+                    "path {:?}|",
+                    (
+                        u.path.current,
+                        u.path.goal,
+                        u.path.reached_goal,
+                        u.path.revision,
+                        u.path.dirty_at,
+                        u.path.repath_at,
+                        u.path.clean_from,
+                        u.waypoints.len(),
+                        u.rects.len(),
+                    )
+                )
+                .into_bytes(),
+            );
+            for w in &u.waypoints {
+                h.extend(bits.vec3(*w));
+            }
+            for r in &u.rects {
+                for v in r {
+                    h.extend(v.to_le_bytes());
+                }
+            }
+            h.extend(b"None");
+        }
+        (stream(&pos), stream(&hidden), bits.nans)
+    }
+
+    /// `Records::stream`: the records in byte order, each after its
+    /// u32 LE length.
+    fn stream(r: &Records) -> Vec<u8> {
+        let mut recs = r.recs();
+        recs.sort_unstable();
+        let mut out = Vec::with_capacity(r.buf.len() + 4 * recs.len());
+        for rec in recs {
+            out.extend((rec.len() as u32).to_le_bytes());
+            out.extend_from_slice(rec);
+        }
+        out
+    }
+
+    pub fn unit(id: u32, rng: &mut impl FnMut() -> u64) -> Unit {
+        let r = rng();
+        let f = |v: u64, m: u64| (v % m) as f32;
+        let n = 12 + (rng() % 14) as usize;
+        let waypoints: Vec<Vec3> = (0..n)
+            .map(|_| {
+                let r = rng();
+                Vec3::new(f(r, 4096), 0.0, f(r >> 20, 4096))
+            })
+            .collect();
+        let rects: Vec<[i32; 4]> = (0..n)
+            .map(|_| {
+                let r = rng();
+                let x = (r % 500) as i32;
+                let z = ((r >> 16) % 500) as i32;
+                [x, z, x + 8, z + 8]
+            })
+            .collect();
+        Unit {
+            id,
+            pos: Vec3::new(f(r, 4096), f(r >> 16, 512), f(r >> 32, 4096)),
+            rot: [
+                0.0,
+                std::f32::consts::FRAC_1_SQRT_2,
+                0.0,
+                std::f32::consts::FRAC_1_SQRT_2,
+            ],
+            mover: Mover {
+                heading: (r % 65536) as u16,
+                turn_speed: -1.0,
+                current_speed: 2.0,
+                goal: Some(glam::Vec2::new(f(r >> 8, 4096), f(r >> 24, 4096))),
+                goal_radius: 8.0,
+                waypoint_dir: glam::Vec2::new(0.343_407_54, 0.939_186_5),
+                curr_wp_dist: 38.227_715,
+                prev_wp_dist: 40.227_673,
+                flags: [false; 12],
+                frames: [3261, 3093, 0, 0],
+                best: [f32::INFINITY, f32::INFINITY],
+                velocity: Vec3::new(0.688_203, 0.0, 1.877_865),
+                old_pos: Vec3::new(1822.2272, 270.362_06, 1501.9749),
+                frame: 3470,
+            },
+            path: Path {
+                current: (r % 10) as usize,
+                goal: Vec3::new(2052.0, 0.0, 1924.0),
+                reached_goal: true,
+                revision: 519,
+                dirty_at: None,
+                repath_at: None,
+                clean_from: None,
+            },
+            waypoints,
+            rects,
+        }
+    }
+}
+
+/// `floatprobe waypoints <secs> <threads>`: see [`waypoints`].
+fn waypoints_probe(secs: u64, n: usize) -> ExitCode {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    let faults = AtomicU64::new(0);
+    let iterations = AtomicU64::new(0);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    std::thread::scope(|s| {
+        for t in 0..n {
+            let (faults, iterations) = (&faults, &iterations);
+            s.spawn(move || {
+                let mut x = 0x1234_5678_9abc_def0u64 ^ (t as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                let mut rng = move || {
+                    x ^= x << 13;
+                    x ^= x >> 7;
+                    x ^= x << 17;
+                    x
+                };
+                let mut units: Vec<waypoints::Unit> = (0..370).map(|i| waypoints::unit(i * 3 + 7, &mut rng)).collect();
+                let mut it = 0u64;
+                while std::time::Instant::now() < deadline {
+                    it += 1;
+                    // A tick's worth of change: units move, a few get
+                    // a new path (a fresh waypoint allocation).
+                    let d = rng();
+                    for u in units.iter_mut() {
+                        u.pos.x += ((d as u32 % 200) as f32 - 100.0) * 0.01;
+                        u.mover.frame += 1;
+                        u.mover.curr_wp_dist -= 2.0;
+                    }
+                    for _ in 0..(d >> 40) % 4 {
+                        let i = (rng() % units.len() as u64) as usize;
+                        let id = units[i].id;
+                        units[i] = waypoints::unit(id, &mut rng);
+                    }
+                    let (p1, h1, n1) = waypoints::capture(&units);
+                    let (p2, h2, n2) = waypoints::capture(&units);
+                    let (p3, h3, n3) = waypoints::capture(&units);
+                    for (name, a, b, c) in [("positions", &p1, &p2, &p3), ("hidden", &h1, &h2, &h3)] {
+                        if a != b || a != c {
+                            faults.fetch_add(1, Ordering::Relaxed);
+                            let at = a.iter().zip(b.iter()).position(|(x, y)| x != y);
+                            println!(
+                                "FAULT on thread {t} iteration {it}: {name} streams differ ({} / {} / {} bytes, NaNs {n1} / {n2} / {n3}), first difference at {at:?}; third {}",
+                                a.len(), b.len(), c.len(),
+                                if c == a { "agrees with the first" } else if c == b { "agrees with the second" } else { "agrees with neither" }
+                            );
+                            if let Some(at) = at {
+                                let w = at & !3;
+                                let word = |s: &[u8]| s.get(w..w + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap()));
+                                println!(
+                                    "  word at {w} (buffer {:#x} / {:#x} mod 4096): {:08x?} vs {:08x?} vs {:08x?}",
+                                    a.as_ptr() as usize % 4096, b.as_ptr() as usize % 4096, word(a), word(b), word(c)
+                                );
+                            }
+                        }
+                    }
+                    if it.is_multiple_of(64) {
+                        let big = 65536 + (rng() as usize % (8 << 20));
+                        let mut v: Vec<u8> = Vec::with_capacity(big);
+                        v.resize(big, (it & 0xff) as u8);
+                        std::hint::black_box(&v);
+                    }
+                    if it.is_multiple_of(16) {
+                        std::thread::yield_now();
+                    }
+                }
+                iterations.fetch_add(it, Ordering::Relaxed);
+            });
+        }
+        let mut elapsed = 0;
+        while std::time::Instant::now() < deadline {
+            std::thread::sleep(
+                std::time::Duration::from_secs(60).min(deadline - std::time::Instant::now()),
+            );
+            elapsed += 1;
+            println!(
+                "{elapsed} min, {} faults so far",
+                faults.load(Ordering::Relaxed)
+            );
+        }
+    });
+    let (f, i) = (
+        faults.load(Ordering::Relaxed),
+        iterations.load(Ordering::Relaxed),
+    );
+    println!("{secs} s on {n} threads: {i} ticks captured three times each, {f} faults");
+    if f > 0 {
+        println!("FAIL: two captures of the same data differed");
+        ExitCode::FAILURE
+    } else {
+        println!("OK: every capture agreed");
+        ExitCode::SUCCESS
+    }
+}
+
 fn threads(n: usize) -> ExitCode {
     let (main_line, main_bits) = thread_report("main");
     println!("{main_line}");
@@ -562,6 +877,10 @@ fn main() -> ExitCode {
                 .unwrap_or(20_000_000),
         ),
         Some("stress") => hash_stress(
+            args.get(1).and_then(|n| n.parse().ok()).unwrap_or(60),
+            args.get(2).and_then(|n| n.parse().ok()).unwrap_or(3),
+        ),
+        Some("waypoints") => waypoints_probe(
             args.get(1).and_then(|n| n.parse().ok()).unwrap_or(60),
             args.get(2).and_then(|n| n.parse().ok()).unwrap_or(3),
         ),

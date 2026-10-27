@@ -113,6 +113,30 @@ jobs:
           path: probe/
           if-no-files-found: error
 
+  # The fault's shape alone (`floatprobe waypoints`, run 40516621326:
+  # a path's waypoint read as the canonical NaN by one of two captures
+  # of the same memory): does it trip outside the game process?
+  waypoints:
+    name: waypoints probe
+    runs-on: macos-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: floatprobe-x86_64-apple-darwin
+          workspaces: net-experiments/m0-floatprobe
+          save-if: false
+      - name: Build the float probe
+        run: |
+          cd net-experiments/m0-floatprobe
+          cargo build --release --locked --target x86_64-apple-darwin
+      - name: Capture the same data three times over, for 90 minutes on 3 threads
+        run: arch -x86_64 net-experiments/m0-floatprobe/target/x86_64-apple-darwin/release/floatprobe waypoints 5400 3
+
   # Earlier experiments, all clean, all gone from the matrix:
   # `floatprobe threads`, `memcmp`, `memcpy` (the libc routines and the
   # per-thread float environment are exact under Rosetta), `floatprobe

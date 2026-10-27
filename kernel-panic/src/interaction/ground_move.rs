@@ -348,7 +348,11 @@ impl PathQueue {
             .iter()
             .map(|(e, (g, o))| (name(*e), *g, o.is_some()))
             .collect();
-        results.sort_by_key(|r| r.0);
+        // Wholly ordered: results of movers no longer alive all share
+        // the name `u32::MAX`, and their map order follows entity ids,
+        // which differ between machines (run 40516621326's reference
+        // and a local Linux replay parted at tick 5825 on this alone).
+        results.sort_by_key(|r| (r.0, r.1.x.to_bits(), r.1.y.to_bits(), r.2));
         format!(
             "epoch {} layers {layers:?} pending {pending:?} queued {queued:?} in_flight {in_flight:?} shared {shared:?} repair_failed {repair_failed:?} results {results:?}",
             self.epoch
