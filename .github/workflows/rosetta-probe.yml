@@ -42,11 +42,22 @@ jobs:
   # all matched while main's runs of the same code diverged one in
   # three, so the difference may be between hosts, not between runs.
   native:
-    name: rosetta probe ${{ matrix.sample }}
+    name: rosetta probe ${{ matrix.sample }} (threads ${{ matrix.threads || 'default' }})
     strategy:
       fail-fast: false
       matrix:
-        sample: [1, 2, 3, 4]
+        # Half the jobs with every Bevy task pool on one thread
+        # (`KP_TASK_THREADS`, headless::add_plugins), half as the game
+        # runs: does the divergence go with the inter-thread traffic?
+        include:
+          - sample: 1
+            threads: 1
+          - sample: 2
+            threads: 1
+          - sample: 3
+            threads: ""
+          - sample: 4
+            threads: ""
     runs-on: macos-latest
     timeout-minutes: 120
     steps:
@@ -90,7 +101,9 @@ jobs:
           # Every tick's state hashed eight more times, each compared
           # with the first (`headless::log_hash`).
           KP_CAPTURE_REPEAT: 8
+          KP_TASK_THREADS: ${{ matrix.threads }}
         run: |
+          echo "task pool threads: ${KP_TASK_THREADS:-default}"
           bash .github/scripts/rosetta-probe.sh \
             target/x86_64-apple-darwin/release/kernel-panic "$GOLDEN_DIR" reference \
             "$RUNS" probe
@@ -101,31 +114,7 @@ jobs:
           path: probe/
           if-no-files-found: error
 
-  # The minimal-reproducer attempt: the state hash's exact code over
-  # unit-like records, continuously, twice per input and against a
-  # scalar reference, with allocation churn and context switches, for
-  # an hour on three threads under Rosetta (about a hundred times the
-  # hashing a replay process does). A fault here is Rosetta's alone.
-  stress:
-    name: hash stress ${{ matrix.sample }}
-    strategy:
-      fail-fast: false
-      matrix:
-        sample: [1, 2, 3]
-    runs-on: macos-latest
-    timeout-minutes: 80
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-apple-darwin
-      - name: Build the float probe
-        run: |
-          cd net-experiments/m0-floatprobe
-          cargo build --release --locked --target x86_64-apple-darwin
-      - name: Chip and Rosetta
-        run: |
-          sysctl -n machdep.cpu.brand_string hw.model
-          sw_vers
-      - name: Hash stress under Rosetta
-        run: arch -x86_64 net-experiments/m0-floatprobe/target/x86_64-apple-darwin/release/floatprobe stress 3600 3
+  # `floatprobe stress` (the state hash's exact code alone, an hour on
+  # three threads, ~51 M hashes a job) ran clean on three runners (run
+  # 40413757395): the hash code by itself does not trip Rosetta. The
+  # job is gone; the replays above are the experiment now.

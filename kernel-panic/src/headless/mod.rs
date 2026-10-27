@@ -353,6 +353,20 @@ fn add_plugins(executor: Executor, assets: AssetRoot) -> App {
             meta_check: bevy::asset::AssetMetaCheck::Never,
             ..default()
         });
+    // The Rosetta probe: `KP_TASK_THREADS=<n>` sizes every task pool
+    // (compute, async compute, IO) to n threads; 1 takes the parallel
+    // schedules' and the sim's parallel scope's inter-thread traffic
+    // out of the process, to see whether the divergence goes with it.
+    #[cfg(not(target_arch = "wasm32"))]
+    let plugins = match std::env::var("KP_TASK_THREADS")
+        .ok()
+        .and_then(|n| n.parse::<usize>().ok())
+    {
+        Some(n) => plugins.set(bevy::app::TaskPoolPlugin {
+            task_pool_options: bevy::app::TaskPoolOptions::with_num_threads(n),
+        }),
+        None => plugins,
+    };
     // wasm: the replay build's panic hook (`web::install_panic_hook`)
     // stays, Bevy's would replace it.
     #[cfg(target_arch = "wasm32")]
