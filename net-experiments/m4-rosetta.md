@@ -70,7 +70,10 @@ any single bit or single byte changed; any float or id field changed by up to
 taken from tick 8589. Whatever Rosetta hashed was further from the Linux
 records than any one-step fault.
 
-## 4. Reading
+## 4. Reading (superseded by §3c)
+
+*Written before the records dumps: the hash was right, the read of one float
+was wrong. Kept for the record.*
 
 The one divergence seen in full had correct sim state and a wrong hash; the
 hash is plain integer code over bytes, and its inputs, the libc it calls and
@@ -88,6 +91,16 @@ x86_64 slice natively, and an Apple-silicon Mac runs the arm64 slice, which
 matches Linux on every run.
 
 ## 5. What to do with the job
+
+*Updated after §3c.* The job cannot be made to pass reliably: the sim tests
+floats for NaN in many places, Rosetta answers one such test in five billion
+wrongly, and a Quad Core replay asks more than that. The game is not at fault
+and no shipped build runs under Rosetta (an Intel Mac runs the x86_64 slice
+natively, Apple silicon the arm64 one). What the job can still assert is that
+Apple's x86_64 libm agrees with Linux, which the float probe does on its own.
+So: make the Rosetta trail comparison advisory (or drop the replay and keep
+the float probe), and report the fault to Apple with `floatprobe parity`,
+which is 40 lines of asm and a loop.
 
 Options, in order of preference:
 
@@ -134,6 +147,54 @@ and under the storage shuffle. Main's trail has no such column, so the
 probe workflow makes its own Linux reference first. The next catch
 names the first tick and the field.
 
+## 3c. Runs 40516621326 and 40542884297: one float, one flag
+
+With the hidden-state column and a repeat capture per tick, the fault shows
+itself inside one process, no Linux needed. Over 128 processes: nine ticks
+where a repeat capture of the same world, in the same exclusive system with
+nothing running in between, produced other bytes than the capture before or
+after it. Every one of them is a single `f32` word read as `0x7fc00000`, the
+canonical NaN, by one capture and as its value by the others, with that
+capture's NaN counter at zero:
+
+| run / job | log, tick | part | what | value |
+|---|---|---|---|---|
+| 40516621326 / 2 | Quad Core 8540 | hidden | (not dumped) | |
+| 40516621326 / 2 | Quad Core 13005 | positions | (not dumped) | |
+| 40516621326 / 3 | Quad Core 13041 | hidden | #1025 waypoint 11 x | 512.0 |
+| 40516621326 / 4 | Dual Core 5579 | hidden | #472 waypoint 11 x | 2368.0 |
+| 40542884297 / 4 | Quad Core 16345 | orders | #4554 move target x | 2852.0 |
+| 40542884297 / 1 | Dual Core 6350 | hidden | #758 waypoint x | 1464.0 |
+| 40542884297 / 1 | Quad Core 9588 | hidden | #2421 waypoint 0 x | 3984.6 |
+| 40542884297 / 1 | Quad Core 11470 | health | #803 max hp | 1000.0 |
+| 40542884297 / 1 | Dual Core 6005 | hidden | #743 waypoint x | 1856.0 |
+
+Three of them were the first capture, whose hash goes into the trail, and
+those are the "divergences" the job reports; the rest healed unseen. The
+earlier persistent divergences (§1) are the same read landing in the sim
+itself: a NaN, or a value a few instructions stale, in a unit's path or
+target, and the unit turning where Linux's did not (§3b).
+
+The standalone `floatprobe waypoints` (the game's byte writer over mover-like
+structs, nothing else) reproduced it under Rosetta: one fault in 3.5 million
+ticks captured three times (run 40542884297). The x86_64 code explains the
+pattern. For a `Vec3`, rustc emits for the x lane one `ucomiss` of the float
+with itself, `setp` to keep the parity flag (the NaN bit) for the counter, a
+few flag-preserving moves, then `jp` on the same flags to choose the bytes;
+the y and z lanes go through a branchless `cmpunordps` blend. Scalar
+`Bits::f32` calls (health, max) get the same `ucomiss`/`setp`/`jp` window.
+Every fault is an x lane or a scalar; never a y or z. One compare's flags,
+read twice a few instructions apart, disagreed: the counter saw "ordered",
+the branch saw "unordered". That is not something a program can do to
+itself; it is the emulator's flag state across those instructions, most
+plausibly lost or recomputed wrongly around a preemption, which is why it
+takes load (four processes on three cores), takes hours, and lands anywhere.
+
+`floatprobe parity` is that window alone, in asm, on floats that are never
+NaN, with an integer `cmp`/`sete`/`je` twin beside it, three threads, a
+billion windows a second each. On real hardware the two readers always agree.
+Under Rosetta on the runner: 253 of 1.43 trillion float windows disagreed in 40 minutes (run 40557952863), every one of them `setp` 0 and `jp` 1, the branch seeing unordered where the register read just before did not, and none of the 1.43 trillion integer windows beside them. The waypoints probe in the same job tripped 17 times in 1.36 million ticks. The fault is the parity flag after `ucomiss` under Rosetta 2 on these runners (macOS 26.6.2 on Apple M1 virtual machines); nothing in the game or the hash. It reads as a float NaN check that spuriously says NaN, once in some five billion checks, and so lands in any code that tests a float for NaN and then uses it, which the sim does all over.
+
 ## 6. Tools
 
 - `kernel-panic --replay … --expect-trail <dir> --dump-dir <d>`: dumps the
@@ -154,6 +215,10 @@ names the first tick and the field.
 - `floatprobe threads [n]`, `floatprobe memcmp [iters]`,
   `floatprobe memcpy [iters] [threads]`, `floatprobe stress [secs] [threads]`
   (all clean under Rosetta; §2).
+- `floatprobe waypoints [secs] [threads]`: the game's byte writer over
+  mover-like structs, three captures a tick compared (§3c; trips under
+  Rosetta). `floatprobe parity [secs] [threads]`: one `ucomiss`, `setp`,
+  moves, `jp` window in asm, and its integer twin (§3c; the reproducer).
 - `.github/workflows/rosetta-probe.yml`, `.github/scripts/rosetta-probe.sh`:
   since 10-27 one process per golden log, all four at once, four rounds a
   runner, four runners: 64 process samples a push of the branch.
