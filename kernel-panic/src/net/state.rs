@@ -544,7 +544,9 @@ fn collect(world: &mut World) -> Collected {
     // Movement and construction bookkeeping, and the path service, as
     // their `Debug` text (exact floats; no entity ids, which differ
     // between machines): where a divergence that first shows in a
-    // position was decided.
+    // position was decided. A path's waypoints and node rectangles go
+    // in as raw bytes: formatting them under Rosetta cost more than
+    // the whole tick (run 40490871914: 45-minute rounds).
     let mut hidden = Records::default();
     let name = |e: Entity| id_of.get(&e).map_or(u32::MAX, |id| id.0);
     let mut hq = world.query::<(
@@ -557,9 +559,38 @@ fn collect(world: &mut World) -> Collected {
         if mover.is_none() && path.is_none() && wait.is_none() {
             continue;
         }
-        hidden
-            .start(id.0.to_le_bytes())
-            .extend(format!("{mover:?}|{path:?}|{wait:?}").into_bytes());
+        let h = hidden.start(id.0.to_le_bytes());
+        h.extend(format!("{mover:?}|").into_bytes());
+        if let Some(p) = path {
+            h.extend(
+                format!(
+                    "path {:?}|",
+                    (
+                        p.current,
+                        p.goal,
+                        p.reached_goal,
+                        p.revision,
+                        p.dirty_at,
+                        p.repath_at,
+                        p.clean_from,
+                        p.waypoints.len(),
+                        p.node_rects.len(),
+                    )
+                )
+                .into_bytes(),
+            );
+            for w in &p.waypoints {
+                h.extend(bits.vec3(*w));
+            }
+            for r in &p.node_rects {
+                for v in [r.x0, r.z0, r.x1, r.z1] {
+                    h.extend(v.to_le_bytes());
+                }
+            }
+        } else {
+            h.extend(b"path None|");
+        }
+        h.extend(format!("{wait:?}").into_bytes());
     }
     if let Some(pq) = world.get_resource::<PathQueue>() {
         hidden
