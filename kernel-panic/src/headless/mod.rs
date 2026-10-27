@@ -175,13 +175,11 @@ pub struct HashLog {
     pub dumps: Vec<(usize, Vec<String>)>,
     /// The trail line every tick is expected to produce (a reference
     /// trail's, [`replay::trail_line`]): the first tick whose line
-    /// differs dumps the state of that tick and of the one before (every
-    /// tick is described while this is set, so the previous one is at
-    /// hand). For a divergence that strikes at an unpredictable tick
+    /// differs dumps the state of that tick, and the records of that
+    /// tick and of the one before (kept from tick to tick while this is
+    /// set). For a divergence that strikes at an unpredictable tick
     /// (the Rosetta probe).
     pub expect: Vec<String>,
-    /// The previous tick's description while `expect` is set.
-    last_described: Option<(usize, Vec<String>)>,
     /// `expect` was missed once already: no further dumps.
     mismatched: bool,
     /// The part hashes' exact input bytes ([`state::records_text`]) of
@@ -271,13 +269,12 @@ fn log_hash(world: &mut World) {
         !log.mismatched && tick <= log.expect.len()
     };
     if expecting {
-        let lines = state::describe(world);
+        let expected =
+            world.resource::<HashLog>().expect[tick - 1] != replay::trail_line(tick, &th);
+        let lines = expected.then(|| state::describe(world));
         let mut log = world.resource_mut::<HashLog>();
-        if log.expect[tick - 1] != replay::trail_line(tick, &th) {
+        if let Some(lines) = lines {
             log.mismatched = true;
-            if let Some(prev) = log.last_described.take() {
-                log.dumps.push(prev);
-            }
             if let Some(prev) = log.last_records.take() {
                 log.records.push(prev);
             }
@@ -295,7 +292,6 @@ fn log_hash(world: &mut World) {
                 }
             }
         } else {
-            log.last_described = Some((tick, lines));
             log.last_records = Some((tick, records));
         }
     }
