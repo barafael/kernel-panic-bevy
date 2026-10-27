@@ -8,6 +8,7 @@
 //!              [--expect-trail <dir>]
 //! kernel-panic --record-golden [<name>…] [--out <dir>]
 //! kernel-panic --command-fuzz [--ticks <n>] [--seed <n>]
+//! kernel-panic --check-records <dump.records>…
 //! ```
 //!
 //! `--replay` writes `<trail-dir>/<log stem>.trail` (default `trails/`)
@@ -19,7 +20,11 @@
 //! records the golden logs ([`super::golden`]), all or the named ones,
 //! into `--out` (default `kernel-panic/tests/golden`). `--command-fuzz`
 //! runs the command fuzz (`net::fuzz`, default 3000 ticks) and fails if
-//! it finds anything.
+//! it finds anything. Every unit dump comes with `<log stem>_<tick>.records`,
+//! the part hashes' exact input bytes; `--check-records` hashes those
+//! bytes here and compares with the hashes they were dumped with (the
+//! Rosetta probe: a dump from a machine whose hash differed, re-hashed
+//! on one whose hash did not).
 
 use std::path::{Path, PathBuf};
 
@@ -34,6 +39,7 @@ pub fn run() -> Option<i32> {
         Some("--replay") => replay_logs(&args[1..]),
         Some("--record-golden") => record_golden(&args[1..]),
         Some("--command-fuzz") => command_fuzz(&args[1..]),
+        Some("--check-records") => check_records(&args[1..]),
         _ => return None,
     };
     Some(match result {
@@ -156,6 +162,11 @@ fn replay_logs(args: &[String]) -> Result<(), String> {
                 std::fs::write(&f, lines.join("\n"))
                     .map_err(|e| format!("{}: {e}", f.display()))?;
             }
+            for (tick, lines) in &played.records {
+                let f = dir.join(format!("{stem}_{tick}.records"));
+                std::fs::write(&f, lines.join("\n"))
+                    .map_err(|e| format!("{}: {e}", f.display()))?;
+            }
         }
         eprintln!("{}", replay::summary(&stem, &replay, &played));
         eprintln!("  trail: {}", out.display());
@@ -178,6 +189,30 @@ fn replay_logs(args: &[String]) -> Result<(), String> {
                 ))
             );
         }
+    }
+    Ok(())
+}
+
+/// Hash the records of each `.records` dump here and compare with the
+/// hashes they were dumped with; exits 1 if any part differs.
+fn check_records(args: &[String]) -> Result<(), String> {
+    let (_, _, files) = split_args(args, &[], &[])?;
+    if files.is_empty() {
+        return Err("--check-records needs at least one .records dump".into());
+    }
+    let mut bad = 0;
+    for f in files {
+        let text = std::fs::read_to_string(f).map_err(|e| format!("{f}: {e}"))?;
+        for (part, dumped, here) in crate::net::state::check_records_text(&text) {
+            let verdict = if dumped == here { "same" } else { "DIFFERENT" };
+            eprintln!("{f} part {part}: dumped {dumped:016x}, hashed here {here:016x}: {verdict}");
+            bad += (dumped != here) as u32;
+        }
+    }
+    if bad > 0 {
+        return Err(format!(
+            "{bad} part hash(es) differ from the dumping machine's"
+        ));
     }
     Ok(())
 }

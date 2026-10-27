@@ -106,7 +106,22 @@ probes, and the hash's own self-check) stays available for more samples.
 
 - `kernel-panic --replay … --expect-trail <dir> --dump-dir <d>`: dumps the
   first tick whose sim hash misses `<dir>/<stem>.trail` and the tick before.
-  The dumps list projectiles now.
+  The dumps list projectiles now. Beside each `<stem>_<tick>.txt` comes
+  `<stem>_<tick>.records`: the four part hashes' exact input bytes (the
+  sorted records, one hex line each, under a `part <i> <hash>` line).
+- `kernel-panic --check-records <dump.records>…`: hashes those bytes on
+  this machine and compares with the hashes they were dumped with. This is
+  the question §3 brute-forced, asked directly: a Rosetta dump that Linux
+  re-hashes to Linux's trail value is the same bytes hashed wrongly, and
+  those bytes are then a 30 KB input to feed the hash a billion times; one
+  that re-hashes to Rosetta's value is a state difference the unit dump
+  did not show, and the diff of the two `.records` files names the record.
+  The probe script also re-hashes every dump in a fresh Rosetta process.
+- `KP_CAPTURE_REPEAT=<n>`: every tick's state captured n more times in the
+  same process, bytes and hash compared with the first capture apart.
 - `floatprobe threads [n]`, `floatprobe memcmp [iters]`,
-  `floatprobe memcpy [iters] [threads]`.
-- `.github/workflows/rosetta-probe.yml`, `.github/scripts/rosetta-probe.sh`.
+  `floatprobe memcpy [iters] [threads]`, `floatprobe stress [secs] [threads]`
+  (all clean under Rosetta; §2).
+- `.github/workflows/rosetta-probe.yml`, `.github/scripts/rosetta-probe.sh`:
+  since 10-27 one process per golden log, all four at once, four rounds a
+  runner, four runners: 64 process samples a push of the branch.

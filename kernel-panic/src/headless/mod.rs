@@ -183,6 +183,13 @@ pub struct HashLog {
     last_described: Option<(usize, Vec<String>)>,
     /// `expect` was missed once already: no further dumps.
     mismatched: bool,
+    /// The part hashes' exact input bytes ([`state::records_text`]) of
+    /// every dumped tick: another machine hashes the very same bytes
+    /// (`--check-records`), which tells a wrong hash from a different
+    /// state.
+    pub records: Vec<(usize, Vec<String>)>,
+    /// The previous tick's records text while `expect` is set.
+    last_records: Option<(usize, Vec<String>)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -201,12 +208,13 @@ fn log_hash(world: &mut World) {
     if !world.resource::<HashLog>().enabled {
         return;
     }
-    let c = state::capture(world);
+    let (c, streams) = state::capture_raw(world);
     let tick = world.resource::<HashLog>().ticks.len() + 1;
     // The Rosetta probe: `KP_CAPTURE_REPEAT=<n>` hashes the same state
     // n more times and reports a capture that disagrees with the first
     // (the game's exact hash code under the game's exact conditions,
-    // n+1 times the exposure per tick).
+    // n+1 times the exposure per tick), telling whether the bytes read
+    // from the world differed or only their hash did.
     static REPEAT: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
     let repeat = *REPEAT.get_or_init(|| {
         std::env::var("KP_CAPTURE_REPEAT")
@@ -215,17 +223,31 @@ fn log_hash(world: &mut World) {
             .unwrap_or(0)
     });
     for k in 0..repeat {
-        let again = state::capture(world);
+        let (again, again_streams) = state::capture_raw(world);
         if again.sim_hash != c.sim_hash || again.part_hashes != c.part_hashes {
             eprintln!(
                 "capture self-disagreement at tick {tick}, repeat {k}: sim {:016x} vs {:016x}, parts {:016x?} vs {:016x?}",
                 c.sim_hash, again.sim_hash, c.part_hashes, again.part_hashes
             );
+            for (i, (a, b)) in streams.iter().zip(&again_streams).enumerate() {
+                let same = a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x == y);
+                eprintln!(
+                    "  part {i}: bytes {} ({} vs {} bytes); FNV of the first capture's bytes now {:016x}, of the repeat's {:016x}",
+                    if same { "identical" } else { "DIFFER" },
+                    a.len(),
+                    b.len(),
+                    state::stream_hash(a),
+                    state::stream_hash(b),
+                );
+            }
         }
     }
+    let records = state::records_text(&streams, &c.part_hashes);
     if world.resource::<HashLog>().dump_at.contains(&tick) {
         let lines = state::describe(world);
-        world.resource_mut::<HashLog>().dumps.push((tick, lines));
+        let mut log = world.resource_mut::<HashLog>();
+        log.dumps.push((tick, lines));
+        log.records.push((tick, records.clone()));
     }
     let expecting = {
         let log = world.resource::<HashLog>();
@@ -239,9 +261,25 @@ fn log_hash(world: &mut World) {
             if let Some(prev) = log.last_described.take() {
                 log.dumps.push(prev);
             }
+            if let Some(prev) = log.last_records.take() {
+                log.records.push(prev);
+            }
             log.dumps.push((tick, lines));
+            log.records.push((tick, records));
+            // Right away, in the same process: do these bytes hash to
+            // what the part hashes say? (`stream_hash` is the same FNV
+            // over the same bytes by another loop.)
+            for (i, (s, h)) in streams.iter().zip(&c.part_hashes).enumerate() {
+                let again = state::stream_hash(s);
+                if again != *h {
+                    eprintln!(
+                        "tick {tick} part {i}: hashed {h:016x}, the same bytes re-hashed {again:016x}"
+                    );
+                }
+            }
         } else {
             log.last_described = Some((tick, lines));
+            log.last_records = Some((tick, records));
         }
     }
     world.resource_mut::<HashLog>().ticks.push(TickHash {

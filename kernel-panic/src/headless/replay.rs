@@ -117,6 +117,9 @@ pub struct Played {
     pub hashes: Vec<TickHash>,
     /// Readable unit dumps at [`PlayOptions::dump_at`].
     pub dumps: Vec<(usize, Vec<String>)>,
+    /// The part hashes' input bytes at the same ticks
+    /// ([`HashLog::records`]).
+    pub records: Vec<(usize, Vec<String>)>,
     /// Wall time inside `FixedUpdate` (the sim), summed over all ticks.
     pub sim_secs: f64,
     /// Wall time of the whole frames (the sim plus `Update`'s UI).
@@ -206,6 +209,7 @@ pub async fn play(
     Ok(Played {
         hashes: std::mem::take(&mut log.ticks),
         dumps: std::mem::take(&mut log.dumps),
+        records: std::mem::take(&mut log.records),
         sim_secs,
         frame_secs,
         load_secs,

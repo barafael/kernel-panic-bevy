@@ -205,15 +205,34 @@ impl Records {
         &mut self.buf
     }
 
-    /// The records in byte order, each hashed after its length.
-    fn hash_sorted(&self) -> u64 {
+    /// The records as slices, in insertion order.
+    fn slices(&self) -> Vec<&[u8]> {
         let ends = self.starts.iter().skip(1).copied().chain([self.buf.len()]);
-        let unsorted: Vec<&[u8]> = self
-            .starts
+        self.starts
             .iter()
             .zip(ends)
             .map(|(&a, b)| &self.buf[a..b])
-            .collect();
+            .collect()
+    }
+
+    /// The hash's exact input: the records in byte order, each after
+    /// its u32 LE length, as one byte string. FNV over it is
+    /// [`Records::hash_sorted`] (the Rosetta probe dumps it, so another
+    /// machine can hash the very same bytes).
+    fn stream(&self) -> Vec<u8> {
+        let mut recs = self.slices();
+        recs.sort_unstable();
+        let mut out = Vec::with_capacity(self.buf.len() + 4 * recs.len());
+        for r in recs {
+            out.extend((r.len() as u32).to_le_bytes());
+            out.extend_from_slice(r);
+        }
+        out
+    }
+
+    /// The records in byte order, each hashed after its length.
+    fn hash_sorted(&self) -> u64 {
+        let unsorted = self.slices();
         let mut recs = unsorted.clone();
         recs.sort_unstable();
         let h = fnv_records(&recs);
@@ -263,6 +282,81 @@ struct CategoryCache {
 }
 
 pub fn capture(world: &mut World) -> Capture {
+    finish(&collect(world))
+}
+
+/// [`capture`], and the four part hashes' exact input bytes
+/// ([`Records::stream`]: positions, health, orders, projectiles).
+pub fn capture_raw(world: &mut World) -> (Capture, [Vec<u8>; 4]) {
+    let c = collect(world);
+    let streams = c.recs.each_ref().map(Records::stream);
+    (finish(&c), streams)
+}
+
+/// FNV of a part's stream: equal to the part hash it was dumped with,
+/// unless the machine that hashed it computed wrongly.
+pub fn stream_hash(stream: &[u8]) -> u64 {
+    let mut h = Fnv::default();
+    h.bytes(stream);
+    h.finish()
+}
+
+/// A dump of the four streams, readable and diffable: per part a
+/// `part <i> <hash>` line and one hex line per record.
+pub fn records_text(streams: &[Vec<u8>; 4], hashes: &[u64; 4]) -> Vec<String> {
+    let mut out = Vec::new();
+    for (i, (s, h)) in streams.iter().zip(hashes).enumerate() {
+        out.push(format!("part {i} {h:016x}"));
+        let mut at = 0;
+        while at + 4 <= s.len() {
+            let n = u32::from_le_bytes(s[at..at + 4].try_into().unwrap()) as usize;
+            at += 4;
+            let r = &s[at..(at + n).min(s.len())];
+            at += n;
+            out.push(r.iter().map(|b| format!("{b:02x}")).collect());
+        }
+    }
+    out
+}
+
+/// Read a [`records_text`] dump back: per part, the hash it was dumped
+/// with and the hash of its records computed here.
+pub fn check_records_text(text: &str) -> Vec<(usize, u64, u64)> {
+    let mut out: Vec<(usize, u64, Fnv)> = Vec::new();
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("part ") {
+            let mut it = rest.split(' ');
+            let i = it.next().and_then(|i| i.parse().ok()).unwrap_or(0);
+            let h = it
+                .next()
+                .and_then(|h| u64::from_str_radix(h, 16).ok())
+                .unwrap_or(0);
+            out.push((i, h, Fnv::default()));
+        } else if let Some((_, _, fnv)) = out.last_mut() {
+            let bytes: Vec<u8> = (0..line.len() / 2)
+                .filter_map(|k| u8::from_str_radix(&line[2 * k..2 * k + 2], 16).ok())
+                .collect();
+            fnv.bytes(&(bytes.len() as u32).to_le_bytes());
+            fnv.bytes(&bytes);
+        }
+    }
+    out.into_iter()
+        .map(|(i, h, f)| (i, h, f.finish()))
+        .collect()
+}
+
+/// One tick's state, read but not yet hashed.
+struct Collected {
+    /// Positions, health / flags, orders, projectiles.
+    recs: [Records; 4],
+    census: BTreeMap<&'static str, usize>,
+    units: usize,
+    projectiles: usize,
+    nans: usize,
+    total_entities: usize,
+}
+
+fn collect(world: &mut World) -> Collected {
     // --- census by archetype -------------------------------------------
     let registered = world.components().len();
     let cats = match world.get_resource::<CategoryCache>() {
@@ -443,18 +537,24 @@ pub fn capture(world: &mut World) -> Capture {
         proj_recs.start(bits.vec3(pos));
     }
 
-    let part_hashes = [
-        pos_recs.hash_sorted(),
-        hp_recs.hash_sorted(),
-        order_recs.hash_sorted(),
-        proj_recs.hash_sorted(),
-    ];
+    Collected {
+        recs: [pos_recs, hp_recs, order_recs, proj_recs],
+        census,
+        units,
+        projectiles,
+        nans: bits.nans,
+        total_entities,
+    }
+}
+
+fn finish(c: &Collected) -> Capture {
+    let part_hashes = c.recs.each_ref().map(Records::hash_sorted);
     let mut sim = Fnv::default();
     for p in part_hashes {
         sim.bytes(&p.to_le_bytes());
     }
     let mut fx = Fnv::default();
-    for (cat, n) in census.iter().filter(|(c, _)| **c != "other") {
+    for (cat, n) in c.census.iter().filter(|(c, _)| **c != "other") {
         let target = if SIM_CATEGORIES.contains(cat) {
             &mut sim
         } else {
@@ -465,14 +565,14 @@ pub fn capture(world: &mut World) -> Capture {
     }
 
     Capture {
-        units,
-        projectiles,
-        census,
+        units: c.units,
+        projectiles: c.projectiles,
+        census: c.census.clone(),
         sim_hash: sim.finish(),
         fx_hash: fx.finish(),
         part_hashes,
-        nans: bits.nans,
-        total_entities,
+        nans: c.nans,
+        total_entities: c.total_entities,
     }
 }
 
