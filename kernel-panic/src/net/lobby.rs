@@ -41,9 +41,14 @@
 //! - **A running match** (M3, [`super::rejoin`]): a newcomer's `Hello`
 //!   reaches the host's session, which answers [`LobbyMsg::Running`]: the
 //!   `Start` with the roster as it is now. Every `Hello` carries the
-//!   peer's [`PlayerKey`], so a player who comes back gets its seat
-//!   back; anyone else watches. The newcomer checks the stamp as at a
-//!   `Start` and joins late ([`MatchStart::join`]).
+//!   peer's [`PlayerKey`] and a proof that it owns the key, so a player
+//!   who comes back gets its seat back; anyone else watches. The newcomer
+//!   checks the stamp as at a `Start` and joins late
+//!   ([`MatchStart::join`]). Nothing vouches for a stranger who says a
+//!   match runs, so a `Running` needs what a `Start` needs: it waits
+//!   [`SETTLE`] for the room to show itself, and counts only from a peer
+//!   no other peer here outranks ([`Lobby::settle_offers`]). A host with
+//!   a room of people ignores it: nobody hosts a room inside a match.
 //!
 //! Lobby and session traffic share the transport: every lobby message
 //! starts with [`LOBBY_TAG`] where a session [`super::wire::Envelope`] has its
@@ -80,7 +85,7 @@ use super::MatchRules;
 use super::chat::{self, ChatLine};
 use super::compat::{Build, Compat};
 use super::driver::{CatchUp, NextNetMatch, PeerNames};
-use super::rejoin::{Door, PlayerKey, Running};
+use super::rejoin::{Door, PlayerKey, PlayerSecret, Running, SeatProof};
 use super::replay_log::{MatchSetup, Seat};
 use super::session::{DelayBounds, SessionConfig};
 use super::transport::{Channel, MAX_MESSAGE, PeerEvent, PeerId, Transport};
@@ -182,7 +187,8 @@ pub const LOBBY_TAG: u16 = 0x4b4c;
 /// one runs another build: it is listed, never seated.
 /// 2 (M3): [`Hello::key`], [`LobbyMsg::Running`] (turn log),
 /// [`LobbyMsg::Chat`] (rooms).
-pub const LOBBY_VERSION: u16 = 2;
+/// 3: [`Hello::key`] is a public key, with its [`Hello::proof`].
+pub const LOBBY_VERSION: u16 = 3;
 
 /// A peer's announcement of itself, to everyone, when it meets them.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -194,8 +200,26 @@ pub struct Hello {
     pub room: Option<RoomState>,
     /// The player's [`PlayerKey`]: who it is across connections, so a
     /// running match gives a returning player its seat back, and a room
-    /// the seat of a peer that reopened its connection.
-    pub key: u64,
+    /// the seat of a peer that reopened its connection. Public: only with
+    /// [`Self::proof`] does it mean anything ([`Self::player_key`]).
+    pub key: PlayerKey,
+    /// The sender's signature over its own connection id.
+    pub proof: SeatProof,
+}
+
+impl Hello {
+    /// Who the peer on connection `from` is: [`Self::key`] if its
+    /// [`Self::proof`] holds for that connection, else nobody (the "none"
+    /// key, which holds no seat). `from` is the transport's word, not the
+    /// message's.
+    pub fn player_key(&self, from: PeerId) -> PlayerKey {
+        if self.key.proven(from, &self.proof) {
+            self.key
+        } else {
+            warn!("{from}: a hello without proof of its key");
+            PlayerKey::default()
+        }
+    }
 }
 
 /// Whether a peer has a map, as its content hash ([`Compat::map_hash`]).
@@ -219,7 +243,7 @@ pub struct Status {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LobbyMsg {
-    Hello(Hello),
+    Hello(Box<Hello>),
     Status(Status),
     /// Guest → host: put me on this open seat.
     Sit {
@@ -680,9 +704,14 @@ pub struct Lobby {
     /// Why the connection to the room is gone ([`Transport::failure`]).
     failure: Option<String>,
     /// Who this player is across connections ([`Hello::key`]).
-    key: PlayerKey,
-    /// A running match's host asked us in ([`LobbyMsg::Running`]); we
-    /// join once our hash of its map is in.
+    secret: PlayerSecret,
+    /// Peers that say a match runs here ([`LobbyMsg::Running`]), waiting
+    /// for [`Self::settle_offers`].
+    offers: BTreeMap<PeerId, Running>,
+    /// When the oldest of [`Self::offers`] came.
+    offers_since: Option<Duration>,
+    /// A running match's host asked us in, and we believe it; we join
+    /// once our hash of its map is in.
     running: Option<Running>,
     /// Reopens the connection when the room is stuck.
     reopen: Option<Connector>,
@@ -699,8 +728,8 @@ pub struct Lobby {
     /// peer that reopened its connection (the same [`Hello::key`]) may
     /// come back to it.
     vacated: BTreeMap<PeerId, usize>,
-    /// Every [`Hello::key`] heard, by connection, kept after the peer
-    /// leaves (for [`Self::vacated`]).
+    /// Every proven [`Hello::key`] heard, by connection, kept after the
+    /// peer leaves (for [`Self::vacated`]).
     keys: BTreeMap<PeerId, PlayerKey>,
 }
 
@@ -738,7 +767,9 @@ impl Lobby {
             events: Vec::new(),
             dirty: true,
             failure: None,
-            key: PlayerKey::random(),
+            secret: PlayerSecret::random(),
+            offers: BTreeMap::new(),
+            offers_since: None,
             running: None,
             reopen: None,
             retry: Retry::fixed(STUCK, MAX_REOPENS),
@@ -751,10 +782,10 @@ impl Lobby {
         }
     }
 
-    /// Introduce ourselves as `key` (the game: [`PlayerKey::local`]; a
-    /// fresh lobby has a random one).
-    pub fn with_key(mut self, key: PlayerKey) -> Self {
-        self.key = key;
+    /// Introduce ourselves as `secret`'s player (the game:
+    /// [`PlayerSecret::local`]; a fresh lobby has a random one).
+    pub fn with_key(mut self, secret: PlayerSecret) -> Self {
+        self.secret = secret;
         self
     }
 
@@ -770,16 +801,16 @@ impl Lobby {
     /// match started. Everyone hears our hello again; those still in
     /// the match ignore it and say hello themselves when they are back
     /// (the host's session ignores a hello from a connection of its match:
-    /// see `Session::knock`). `key`: ours, as in the match.
+    /// see `Session::knock`). `secret`: ours, as in the match.
     pub fn resume(
         transport: Box<dyn Transport>,
         peers: &[PeerId],
         name: &str,
         default_map: &str,
         room: Option<RoomState>,
-        key: PlayerKey,
+        secret: PlayerSecret,
     ) -> Self {
-        let mut l = Self::new(transport, name, default_map).with_key(key);
+        let mut l = Self::new(transport, name, default_map).with_key(secret);
         l.room = room;
         let hello = l.hello();
         for &peer in peers {
@@ -897,12 +928,14 @@ impl Lobby {
     }
 
     fn hello(&self) -> LobbyMsg {
-        LobbyMsg::Hello(Hello {
+        LobbyMsg::Hello(Box::new(Hello {
             name: self.name.clone(),
             build: self.build,
             room: self.room.clone(),
-            key: self.key.0,
-        })
+            key: self.secret.key(),
+            // Without an id yet there is nobody to say hello to.
+            proof: self.secret.proof(self.me().unwrap_or_default()),
+        }))
     }
 
     /// Our name in the room.
@@ -1039,6 +1072,7 @@ impl Lobby {
                 PeerEvent::Left(peer) => {
                     self.connected.remove(&peer);
                     self.peers.remove(&peer);
+                    self.offers.remove(&peer);
                 }
             }
             self.dirty = true;
@@ -1067,6 +1101,7 @@ impl Lobby {
                 return;
             }
         }
+        self.settle_offers(now);
         if self.running.is_some() {
             self.join_running();
             return;
@@ -1077,7 +1112,8 @@ impl Lobby {
             .all(|p| self.peers.get(p).is_some_and(PeerInfo::introduced))
             || now.saturating_sub(self.last_join) >= SETTLE;
         if self.is_host() {
-            if self.settled {
+            // Not while a match may be asking us in: no blank room.
+            if self.settled && self.offers.is_empty() {
                 self.keep_room();
             }
         } else {
@@ -1153,6 +1189,8 @@ impl Lobby {
         self.connected.clear();
         self.peers.clear();
         self.missing.clear();
+        self.offers.clear();
+        self.offers_since = None;
         self.sent = None;
         self.sent_status = None;
         self.settled = false;
@@ -1170,7 +1208,8 @@ impl Lobby {
                 info.name = Some(clean_name(&h.name));
                 info.incompatible = mismatch;
                 info.room = h.room.clone();
-                self.keys.insert(from, PlayerKey(h.key));
+                let key = h.player_key(from);
+                self.keys.insert(from, key);
                 if info.compatible()
                     && let Some(room) = h.room
                     && self.offered.as_ref().is_none_or(|o| room.rev > o.rev)
@@ -1189,7 +1228,7 @@ impl Lobby {
                 if self.is_host()
                     && let Some(room) = self.room.as_ref()
                     && room.seat_of(from).is_none()
-                    && let Some(seat) = self.seat_of_key(PlayerKey(h.key), from)
+                    && let Some(seat) = self.seat_of_key(key, from)
                     && let Some(room) = self.room.as_mut()
                 {
                     // It reopened its connection (the same key, a new
@@ -1233,15 +1272,10 @@ impl Lobby {
                 }
             }
             // A match runs in this room (its peers' sessions never say
-            // hello): its host asks us in.
+            // hello): someone says it hosts it. We'll see.
             LobbyMsg::Running(running) => {
                 if running.host == from && self.running.is_none() {
-                    info!(
-                        "a match runs in this room ({} turns in): joining",
-                        running.newest
-                    );
-                    self.running = Some(*running);
-                    self.dirty = true;
+                    self.offers.insert(from, *running);
                 }
             }
             // Spring drops a line that claims another sender
@@ -1260,6 +1294,75 @@ impl Lobby {
             | LobbyMsg::Faction { .. }
             | LobbyMsg::Chat { .. } => {}
         }
+    }
+
+    /// Decide on the [`Self::offers`] once they are [`SETTLE`] old. Peers
+    /// can't vouch for a stranger's match, so the lowest id among the
+    /// offers must also be below every compatible peer in a room with
+    /// others: the bar a `Start` has to clear ([`Self::host`], leaving us
+    /// out, as a newcomer's id may be lower than the match's host's, and
+    /// other newcomers, who know no better than we do). The wait lets a
+    /// newcomer meet the room first. Each offer gets one answer: the real
+    /// host of a match only asks again if we say hello again.
+    fn settle_offers(&mut self, now: Duration) {
+        if self.offers.is_empty() {
+            self.offers_since = None;
+            return;
+        }
+        let since = *self.offers_since.get_or_insert(now);
+        if self.hosts_others() && since.saturating_sub(self.opened_at.unwrap_or(now)) >= SETTLE {
+            // Out of the blue: a match of this room would have held us.
+            warn!("ignored a claim of a running match: we host this room");
+            self.offers.clear();
+            self.offers_since = None;
+            return;
+        }
+        if now.saturating_sub(since) < SETTLE {
+            return;
+        }
+        self.offers_since = None;
+        let offers = std::mem::take(&mut self.offers);
+        let me = self.me();
+        let lowest_here = self
+            .connected
+            .iter()
+            .copied()
+            .filter(|p| {
+                Some(*p) != me
+                    && self.peers.get(p).is_some_and(PeerInfo::compatible)
+                    && self.in_a_room(*p)
+            })
+            .min();
+        let Some((from, running)) = offers.into_iter().next() else {
+            return;
+        };
+        if lowest_here.is_some_and(|peer| peer < from) {
+            warn!("ignored {from}'s claim of a running match: {lowest_here:?} outranks it");
+            return;
+        }
+        info!(
+            "a match runs in this room ({} turns in): joining",
+            running.newest
+        );
+        self.running = Some(running);
+        self.dirty = true;
+    }
+
+    /// `peer` shares a room with someone, as our room or its hello shows.
+    fn in_a_room(&self, peer: PeerId) -> bool {
+        let with_others =
+            |r: &RoomState| r.members.len() > 1 && (r.host == peer || r.member(peer).is_some());
+        self.room.as_ref().is_some_and(with_others)
+            || self
+                .peers
+                .get(&peer)
+                .and_then(|i| i.room.as_ref())
+                .is_some_and(with_others)
+    }
+
+    /// We are hosting a room with someone else in it.
+    fn hosts_others(&self) -> bool {
+        self.is_host() && self.sent.as_ref().is_some_and(|r| r.members.len() > 1)
     }
 
     /// The running match we were asked into, once our hash of its map is
@@ -1791,7 +1894,7 @@ impl Lobby {
             .iter()
             .map(|&(p, _)| {
                 let key = if p == me {
-                    self.key
+                    self.secret.key()
                 } else {
                     self.keys.get(&p).copied().unwrap_or_default()
                 };
@@ -2038,7 +2141,7 @@ fn enter(
     info!("entering room {room} as {}", lobby.name);
     let mut open = connector.to(room.clone());
     let l = Lobby::new(open(), &lobby.name, &default_map(catalog))
-        .with_key(PlayerKey::local())
+        .with_key(PlayerSecret::local())
         .with_reopen(open);
     lobby.open(room, l);
 }
@@ -2078,7 +2181,7 @@ fn back_to_room(world: &mut World) {
         &lobby.name,
         &map,
         state,
-        PlayerKey::local(),
+        PlayerSecret::local(),
     )
     .with_reopen(open);
     lobby.open(room, l);
@@ -2722,6 +2825,139 @@ mod tests {
         assert_eq!(after.members.len(), 2);
     }
 
+    /// What every peer hears of `id`'s hello, sent to `to` from `thief`'s
+    /// connection, keeps the seat where it is; the same key on a connection
+    /// it signed gets the seat (a stuck room's reopen).
+    #[test]
+    fn a_copied_hello_takes_no_seat_in_the_room() {
+        let mut n = Net::new(3);
+        let a = n.join(10, "ann");
+        let b = n.join(20, "ben");
+        n.run(4.0);
+        assert_eq!(n.room(a).seats[1].who, Occupant::Human(b));
+        let copied = n.lobby(b).hello();
+        let secret = n.lobby(b).secret.clone();
+        let thief = PeerId(30);
+        let mut t = n.net.join(thief);
+        n.run(1.0);
+        t.send(a, Channel::Reliable, encode(copied).unwrap());
+        n.run(3.0);
+        assert_eq!(n.room(a).seats[1].who, Occupant::Human(b), "still ben's");
+        assert_eq!(n.lobby(a).keys.get(&thief), Some(&PlayerKey::default()));
+
+        let back = PeerId(40);
+        let mut l = Lobby::new(Box::new(n.net.join(back)), "ben", MAP).with_key(secret);
+        l.provide_map(MAP, MapHave::Hash(7));
+        n.peers.insert(back, l);
+        n.run(3.0);
+        assert_eq!(n.room(a).seats[1].who, Occupant::Human(back), "ben again");
+    }
+
+    /// A match that isn't: anyone can say one runs.
+    fn claim(claimant: PeerId, roster: Vec<(PeerId, Option<u8>)>) -> Vec<u8> {
+        encode(LobbyMsg::Running(Box::new(Running {
+            start: StartMsg {
+                match_id: 666,
+                setup: encode_setup(&GameSetup {
+                    map: MAP.into(),
+                    ..Default::default()
+                }),
+                roster,
+                compat: Compat::of(Build::current(), 7),
+            },
+            host: claimant,
+            gone: Vec::new(),
+            names: Vec::new(),
+            newest: 0,
+        })))
+        .unwrap()
+    }
+
+    /// A stranger above the room's host can neither close a member's room
+    /// (a roster without it) nor pull it into a match (a roster with it),
+    /// nor reach the host itself, though the stranger's id is below every
+    /// other member's: the host goes by hosting.
+    #[test]
+    fn a_strangers_claim_of_a_match_moves_nobody() {
+        let mut n = Net::new(4);
+        let a = n.join(10, "ann");
+        let b = n.join(40, "ben");
+        n.run(4.0);
+        let thief = PeerId(30);
+        let mut t = n.net.join(thief);
+        n.run(1.0);
+        for to in [a, b] {
+            t.send(to, Channel::Reliable, claim(thief, Vec::new()));
+            t.send(to, Channel::Reliable, claim(thief, vec![(to, None)]));
+        }
+        n.run(5.0);
+        for id in [a, b] {
+            let l = n.lobby(id);
+            assert!(l.take_events().is_empty(), "{id} was moved");
+            assert!(!l.joining(), "{id} believes it");
+            assert!(l.offers.is_empty());
+        }
+        assert!(n.lobby(a).is_host());
+        assert_eq!(n.room(b).seats[1].who, Occupant::Human(b));
+    }
+
+    /// Two say a match runs: the wait lets the real host's word in, and
+    /// the lower id counts, whichever spoke first. Another newcomer in
+    /// the same moment outranks neither.
+    #[test]
+    fn newcomers_believe_the_lowest_claim_after_the_wait() {
+        let mut n = Net::new(5);
+        let (first, second) = (PeerId(5), PeerId(6));
+        let host = PeerId(20);
+        let fake = PeerId(30);
+        let mut real = n.net.join(host);
+        let mut liar = n.net.join(fake);
+        for id in [first, second] {
+            n.join(id.0, "new");
+        }
+        n.run(1.0);
+        for id in [first, second] {
+            let roster = vec![(host, Some(0)), (id, None)];
+            liar.send(id, Channel::Reliable, claim(fake, roster.clone()));
+        }
+        n.run(1.0);
+        for id in [first, second] {
+            let roster = vec![(host, Some(0)), (id, None)];
+            real.send(id, Channel::Reliable, claim(host, roster));
+        }
+        n.run(0.5);
+        assert!(!n.lobby(first).joining(), "it waits");
+        n.run(4.0);
+        for id in [first, second] {
+            let events = n.lobby(id).take_events();
+            let Some(LobbyEvent::Start(start)) = events.first() else {
+                panic!("{id}: {events:?}");
+            };
+            assert_eq!(start.join.as_ref().map(|j| j.0), Some(host), "{id}");
+        }
+    }
+
+    /// The limit of it, as for a `Start`: a peer below the whole room has
+    /// the host's say, and a newcomer can't tell.
+    #[test]
+    fn a_claim_from_below_the_room_counts() {
+        let mut n = Net::new(6);
+        let a = n.join(10, "ann");
+        let b = n.join(20, "ben");
+        n.run(4.0);
+        let low = PeerId(5);
+        let mut t = n.net.join(low);
+        n.run(1.0);
+        t.send(
+            b,
+            Channel::Reliable,
+            claim(low, vec![(low, None), (b, None)]),
+        );
+        n.run(4.0);
+        let events = n.lobby(b).take_events();
+        assert!(matches!(events.first(), Some(LobbyEvent::Start(_))), "{a}");
+    }
+
     /// Another build is listed with the reason, never hosts or sits; a
     /// guest without the map blocks the start with a readable reason; a
     /// map change clears the ready flags.
@@ -2996,7 +3232,7 @@ mod tests {
             let (t, room) = n.away.remove(&id).unwrap();
             let others: Vec<PeerId> = [a, b, c].into_iter().filter(|p| *p != id).collect();
             let name = start_room.member(id).unwrap().name.clone();
-            let mut l = Lobby::resume(t, &others, &name, MAP, room, PlayerKey::random());
+            let mut l = Lobby::resume(t, &others, &name, MAP, room, PlayerSecret::random());
             l.provide_map(MAP, MapHave::Hash(7));
             n.peers.insert(id, l);
         };

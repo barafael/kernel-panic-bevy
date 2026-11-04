@@ -4,13 +4,21 @@
 //! room watches.
 //!
 //! - **Who is who.** A connection's [`PeerId`] is new every time (a
-//!   matchbox UUID per socket), so seats belong to a [`PlayerKey`]: a
-//!   random number each game keeps for itself ([`PlayerKey::local`]: per
-//!   browser tab in `sessionStorage`, so a reload keeps it; per process
-//!   natively) and says in its lobby `Hello`. omdurman's finding
+//!   matchbox UUID per socket), so seats belong to a [`PlayerKey`]: the
+//!   public half of a key pair each game keeps for itself
+//!   ([`PlayerSecret::local`]: per browser tab in `sessionStorage`, so a
+//!   reload keeps it; per process natively). omdurman's finding
 //!   (`omdurman-net/src/lib.rs`, `PlayerKey`): bind seats to stable
 //!   keys, not to session ids. Spring binds them to the player's name
 //!   (`CGameServer::BindConnection`, `Net/GameServer.cpp:2914`).
+//! - **Proving it.** The lobby `Hello` goes to everyone, so the key in it
+//!   is public; what claims the seat is the [`SeatProof`] beside it, a
+//!   signature over the sender's own connection id. The signaling server
+//!   assigns those ids and the transport says who sent what, so a `Hello`
+//!   copied onto another connection proves nothing
+//!   ([`super::lobby::Hello::player_key`] gives the "none" key, which watches). It takes no round trip and no
+//!   secret on the wire, and any peer can check it: a host elected later
+//!   needs nothing handed over.
 //! - **The door.** The host's session answers a newcomer's `Hello` while
 //!   the match runs ([`super::session::Session`]'s `knock`): the key of
 //!   a seat gets that seat back (the old connection leaves the roster,
@@ -48,70 +56,180 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
 use super::lobby::StartMsg;
 use super::transport::PeerId;
 
-/// A player's identity across connections: what a seat belongs to.
+/// A player's identity across connections, what a seat belongs to: an
+/// Ed25519 public key. Public: every lobby `Hello` shows it. All zeros
+/// is "none" (nobody's seat).
 #[derive(
     Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
 )]
-pub struct PlayerKey(pub u64);
+pub struct PlayerKey(pub [u8; 32]);
 
 impl std::fmt::Display for PlayerKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:016x}", self.0)
+        f.write_str(&hex(&self.0))
     }
 }
 
 impl PlayerKey {
-    /// A fresh random key (never 0: 0 is "none").
-    pub fn random() -> Self {
-        Self(crate::game_setup::random_seed() | 1)
-    }
-
-    /// This game's key. Web: kept in the tab's `sessionStorage`, so a
-    /// reload (and only this tab) keeps it. Native: `KP_PLAYER_KEY`
-    /// (hex) if set, else one per process — a player whose connection
-    /// broke rejoins from the same game; a restarted game watches.
-    pub fn local() -> Self {
-        #[cfg(target_arch = "wasm32")]
-        {
-            web_key().unwrap_or_else(Self::random)
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            static KEY: std::sync::OnceLock<PlayerKey> = std::sync::OnceLock::new();
-            *KEY.get_or_init(|| {
-                std::env::var("KP_PLAYER_KEY")
-                    .ok()
-                    .and_then(|k| u64::from_str_radix(k.trim(), 16).ok())
-                    .filter(|k| *k != 0)
-                    .map_or_else(Self::random, PlayerKey)
+    /// Did this key's owner sign `connection` as its own?
+    pub fn proven(&self, connection: PeerId, proof: &SeatProof) -> bool {
+        // `verify_strict`: no weak keys, whose signatures fit any message.
+        *self != Self::default()
+            && VerifyingKey::from_bytes(&self.0).is_ok_and(|key| {
+                key.verify_strict(&proof_message(connection), &proof.signature())
+                    .is_ok()
             })
-        }
     }
 }
 
-/// Web: the tab's key from `sessionStorage`, made and stored on first
-/// use.
+/// An Ed25519 signature over one connection id ([`PlayerSecret::proof`]).
+/// Two halves: serde has no 64-byte arrays.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SeatProof(pub [u8; 32], pub [u8; 32]);
+
+impl SeatProof {
+    fn signature(&self) -> Signature {
+        let mut bytes = [0; 64];
+        bytes[..32].copy_from_slice(&self.0);
+        bytes[32..].copy_from_slice(&self.1);
+        Signature::from_bytes(&bytes)
+    }
+}
+
+/// What a [`SeatProof`] signs: the connection, under a tag of its own so
+/// the signature means nothing anywhere else.
+fn proof_message(connection: PeerId) -> [u8; 43] {
+    const TAG: &[u8; 27] = b"kernel-panic seat proof v1\0";
+    let mut message = [0; 43];
+    message[..27].copy_from_slice(TAG);
+    message[27..].copy_from_slice(&connection.0.to_le_bytes());
+    message
+}
+
+/// The private half of a [`PlayerKey`]. It never leaves this game.
+#[derive(Clone)]
+pub struct PlayerSecret(SigningKey);
+
+impl std::fmt::Debug for PlayerSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "PlayerSecret({})", self.key())
+    }
+}
+
+impl PlayerSecret {
+    /// A fresh key from the system's secure random source (not the
+    /// game's: [`crate::game_setup::random_seed`] is guessable).
+    pub fn random() -> Self {
+        Self(SigningKey::from_bytes(&secure_seed()))
+    }
+
+    /// The key derived from a small number, for tests and `KP_PLAYER_KEY`.
+    /// Anyone can guess such a key: never a player's by default.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn from_small_seed(seed: u64) -> Self {
+        let mut bytes = [0; 32];
+        bytes[..8].copy_from_slice(&seed.to_le_bytes());
+        Self(SigningKey::from_bytes(&bytes))
+    }
+
+    /// This game's key. Web: kept in the tab's `sessionStorage`, so a
+    /// reload (and only this tab) keeps it. Native: `KP_PLAYER_KEY` (hex,
+    /// a dev tool: see [`Self::from_small_seed`]) if set, else one per
+    /// process — a player whose connection broke rejoins from the same
+    /// game; a restarted game watches.
+    pub fn local() -> Self {
+        #[cfg(target_arch = "wasm32")]
+        {
+            web_secret().unwrap_or_else(Self::random)
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            static SECRET: std::sync::OnceLock<PlayerSecret> = std::sync::OnceLock::new();
+            SECRET
+                .get_or_init(|| {
+                    std::env::var("KP_PLAYER_KEY")
+                        .ok()
+                        .and_then(|k| u64::from_str_radix(k.trim(), 16).ok())
+                        .filter(|k| *k != 0)
+                        .map_or_else(Self::random, Self::from_small_seed)
+                })
+                .clone()
+        }
+    }
+
+    /// The public half: who this is.
+    pub fn key(&self) -> PlayerKey {
+        PlayerKey(self.0.verifying_key().to_bytes())
+    }
+
+    /// `connection` is ours.
+    pub fn proof(&self, connection: PeerId) -> SeatProof {
+        let bytes = self.0.sign(&proof_message(connection)).to_bytes();
+        let mut proof = SeatProof::default();
+        proof.0.copy_from_slice(&bytes[..32]);
+        proof.1.copy_from_slice(&bytes[32..]);
+        proof
+    }
+}
+
+/// 32 bytes from the operating system. Without them there is no safe key
+/// to make, and no way to play on: a guessable key would give the seat
+/// to anyone.
+#[cfg(not(target_arch = "wasm32"))]
+fn secure_seed() -> [u8; 32] {
+    let mut seed = [0; 32];
+    getrandom::fill(&mut seed).expect("the system's random source failed");
+    seed
+}
+
+/// 32 bytes from the browser's `crypto.getRandomValues` (see the native
+/// [`secure_seed`] on failing).
 #[cfg(target_arch = "wasm32")]
-fn web_key() -> Option<PlayerKey> {
+fn secure_seed() -> [u8; 32] {
+    let mut seed = [0; 32];
+    web_sys::window()
+        .and_then(|w| w.crypto().ok())
+        .and_then(|c| c.get_random_values_with_u8_array(&mut seed).ok())
+        .expect("the browser's random source failed");
+    seed
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Web: the tab's secret from `sessionStorage`, made and stored on first
+/// use. Anything else stored there (an older build's key) is replaced.
+#[cfg(target_arch = "wasm32")]
+fn web_secret() -> Option<PlayerSecret> {
     const STORAGE_KEY: &str = "kernel-panic.player-key";
     let storage = web_sys::window()?.session_storage().ok()??;
-    if let Some(k) = storage
-        .get_item(STORAGE_KEY)
-        .ok()
-        .flatten()
-        .and_then(|k| u64::from_str_radix(&k, 16).ok())
-        .filter(|k| *k != 0)
+    if let Some(stored) = storage.get_item(STORAGE_KEY).ok().flatten()
+        && let Some(seed) = unhex32(&stored)
     {
-        return Some(PlayerKey(k));
+        return Some(PlayerSecret(SigningKey::from_bytes(&seed)));
     }
-    let key = PlayerKey::random();
-    let _ = storage.set_item(STORAGE_KEY, &key.to_string());
-    Some(key)
+    let secret = PlayerSecret::random();
+    let _ = storage.set_item(STORAGE_KEY, &hex(secret.0.as_bytes()));
+    Some(secret)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn unhex32(text: &str) -> Option<[u8; 32]> {
+    if text.len() != 64 || !text.is_ascii() {
+        return None;
+    }
+    let mut bytes = [0; 32];
+    for (byte, pair) in bytes.iter_mut().zip(text.as_bytes().chunks(2)) {
+        *byte = u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?;
+    }
+    Some(bytes)
 }
 
 /// What the host needs to let late joiners into its running match: the
@@ -179,6 +297,10 @@ pub struct Running {
 mod tests {
     use super::*;
 
+    fn key(seed: u64) -> PlayerKey {
+        PlayerSecret::from_small_seed(seed).key()
+    }
+
     #[test]
     fn seats_follow_keys_not_connections() {
         let host = PeerId(1);
@@ -191,31 +313,63 @@ mod tests {
                 roster: roster.iter().map(|(p, s)| (*p, *s)).collect(),
                 compat: crate::net::compat::Compat::of(crate::net::compat::Build::current(), 0),
             },
-            keys: [
-                (host, PlayerKey(10)),
-                (PeerId(5), PlayerKey(11)),
-                (PeerId(9), PlayerKey(12)),
-            ]
-            .into(),
+            keys: [(host, key(10)), (PeerId(5), key(11)), (PeerId(9), key(12))].into(),
             names: BTreeMap::new(),
             in_room: BTreeSet::new(),
         };
         assert_eq!(
-            door.seat_for(&roster, PlayerKey(11), host),
+            door.seat_for(&roster, key(11), host),
             (Some(1), Some(PeerId(5))),
             "the seat's key gets it back"
         );
         assert_eq!(
-            door.seat_for(&roster, PlayerKey(12), host),
+            door.seat_for(&roster, key(12), host),
             (None, Some(PeerId(9))),
             "a spectator watches again"
         );
-        assert_eq!(door.seat_for(&roster, PlayerKey(77), host), (None, None));
+        assert_eq!(door.seat_for(&roster, key(77), host), (None, None));
         assert_eq!(
-            door.seat_for(&roster, PlayerKey(10), host),
+            door.seat_for(&roster, key(10), host),
             (None, None),
             "nobody takes the host's place"
         );
-        assert_eq!(door.seat_for(&roster, PlayerKey(0), host), (None, None));
+        assert_eq!(
+            door.seat_for(&roster, PlayerKey::default(), host),
+            (None, None)
+        );
+    }
+
+    /// A proof names one key and one connection: a copy on any other
+    /// connection, or under any other key, is worth nothing.
+    #[test]
+    fn a_proof_is_good_for_its_own_connection_only() {
+        let secret = PlayerSecret::from_small_seed(1);
+        let me = PeerId(5);
+        let proof = secret.proof(me);
+        assert!(secret.key().proven(me, &proof));
+        assert!(
+            !secret.key().proven(PeerId(6), &proof),
+            "copied onto another connection"
+        );
+        assert!(!key(2).proven(me, &proof), "under another key");
+        let mut bent = proof;
+        bent.0[0] ^= 1;
+        assert!(!secret.key().proven(me, &bent), "altered");
+        assert!(
+            !PlayerKey::default().proven(me, &SeatProof::default()),
+            "the \"none\" key"
+        );
+        // A weak public key (the identity point) signs anything.
+        let mut weak = [0; 32];
+        weak[0] = 1;
+        let mut anything = SeatProof::default();
+        anything.0[0] = 1;
+        assert!(!PlayerKey(weak).proven(me, &anything), "a weak key");
+    }
+
+    /// Fresh keys come from the secure source, and differ.
+    #[test]
+    fn fresh_keys_differ() {
+        assert_ne!(PlayerSecret::random().key(), PlayerSecret::random().key());
     }
 }

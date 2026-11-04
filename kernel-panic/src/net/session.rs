@@ -1563,7 +1563,7 @@ impl Session {
             } else if self.is_host()
                 && let lobby::Decoded::Msg(LobbyMsg::Hello(hello)) = lobby::decode(&bytes)
             {
-                self.knock(from, hello, now);
+                self.knock(from, *hello, now);
             }
         }
         self.check_timeouts(now, opened);
@@ -1571,7 +1571,7 @@ impl Session {
 
     /// Host: `from` introduced itself in the room while the match runs
     /// (a lobby `Hello`): let it in through the [`Door`] — back on the
-    /// seat its [`PlayerKey`] played, or watching — and answer with the
+    /// seat its proven [`PlayerKey`] played, or watching — and answer with the
     /// match ([`Running`]), which it joins as a late joiner
     /// ([`Self::late`]). Spring's server likewise accepts a known name
     /// back onto its player slot, killing a link still open under it,
@@ -1595,8 +1595,12 @@ impl Session {
         // connection the match has (back in the room after a `Bye`, or
         // still to be told of its own start), or a player that went back
         // to the room, reconnected.
-        let key = PlayerKey(hello.key);
-        if self.roster.contains_key(&from) || door.in_room.contains(&key) {
+        if self.roster.contains_key(&from) {
+            h.door = Some(door);
+            return;
+        }
+        let key = hello.player_key(from);
+        if key != PlayerKey::default() && door.in_room.contains(&key) {
             h.door = Some(door);
             return;
         }
