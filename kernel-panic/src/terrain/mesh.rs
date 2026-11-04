@@ -15,9 +15,10 @@ use crate::terrain::heightmap::Heightmap;
 /// chunks and Hex Farm (12288 elmos, 1537²) 2304; at 64 they are 256
 /// and 576. Frustum culling gets coarser, which an RTS camera
 /// looking at a few hundred squares never notices. A full chunk is
-/// 65×65 = 4225 vertices, far inside even a u16 index range (the
-/// builder uses u32 anyway). Hex Farm's rebuild-on-reshape and the
-/// chunk coords in `map_loading` derive from this constant.
+/// 65×65 = 4225 vertices, far inside a u16 index range, which the
+/// builder uses: half the index memory, on the CPU (kept for picking) and
+/// the GPU alike. Hex Farm's rebuild-on-reshape and the chunk coords in
+/// `map_loading` derive from this constant.
 pub const CHUNK_SIZE: usize = 64;
 
 pub struct TerrainChunk {
@@ -81,9 +82,9 @@ pub fn build_chunk(
     let mut indices = Vec::with_capacity(quads_w * quads_h * 6);
     for quad_z in 0..quads_h {
         for quad_x in 0..quads_w {
-            let top_left = (quad_z * local_w + quad_x) as u32;
+            let top_left = (quad_z * local_w + quad_x) as u16;
             let top_right = top_left + 1;
-            let bottom_left = ((quad_z + 1) * local_w + quad_x) as u32;
+            let bottom_left = ((quad_z + 1) * local_w + quad_x) as u16;
             let bottom_right = bottom_left + 1;
             indices.extend_from_slice(&[
                 top_left,
@@ -103,7 +104,7 @@ pub fn build_chunk(
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
-    mesh.insert_indices(Indices::U32(indices));
+    mesh.insert_indices(Indices::U16(indices));
 
     TerrainChunk {
         mesh,
@@ -273,8 +274,8 @@ mod tests {
 
     /// Chunk counts the draw budget is sized on: a 16×16 map (8192
     /// elmos, 1025² heights) and Hex Farm (12288 elmos, 1537²). Also
-    /// pins the per-chunk vertex count under the u16 index limit so
-    /// the builder's u32 indices are never a hidden requirement.
+    /// pins the per-chunk vertex count under the limit of the builder's
+    /// u16 indices.
     #[test]
     fn chunk_counts_and_vertex_budget() {
         let side = |elmos: usize| elmos / spring_map::map_types::SQUARE_SIZE as usize + 1;

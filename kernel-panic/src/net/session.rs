@@ -71,7 +71,7 @@ use std::time::Duration;
 use super::lobby::{self, LobbyMsg, StartMsg};
 use super::rejoin::{Door, PlayerKey, Running};
 use super::speed::{PeerLoad, SERVER_PLAYER, SpeedControl, SpeedPolicy};
-use super::transport::{Channel, PeerEvent, PeerId, Transport};
+use super::transport::{Channel, MAX_MESSAGE, PeerEvent, PeerId, Transport};
 use super::wire::{self, Batch, Echo, InputPacket, Msg, PlayerCommands, Turn, TurnPacket, TurnRun};
 use super::{CommandFrame, SimCommand};
 use crate::sim::DetFloat;
@@ -91,6 +91,32 @@ const TURN_HORIZON: u32 = 3600;
 /// every turn, so a guest stalled for longer, or a late joiner replaying
 /// the match from its start, asks again for the next run.)
 const FILL_MAX: u32 = 1800;
+
+/// One gap fill per link per this long: a fill costs the host up to
+/// [`FILL_MAX`] turns cloned and encoded for a request of a few bytes. A
+/// guest asks once per fill, so an honest one never notices; a request
+/// dropped here is asked for again ([`Session::flush`]).
+const FILL_EVERY: Duration = Duration::from_millis(10);
+
+/// What the commands of one turn, or of one guest's batch, may encode to:
+/// over this they would not fit one message of [`MAX_MESSAGE`] bytes with
+/// the packet around them. A turn that does not fit can never reach the
+/// guests, which would wait for it forever.
+const TURN_BUDGET: usize = MAX_MESSAGE - 256;
+
+/// How many ticks ahead of the next cut a guest's batch may be scheduled.
+/// Honest targets are at most the input delay ahead; a far one would hold
+/// that seat's later commands, and its `Dropped`, back for as long.
+const TARGET_AHEAD_MAX: u32 = 1800;
+
+/// How far past the next expected seq a guest's batch is held. A guest
+/// repeats its unacknowledged batches from the oldest on, so honest gaps
+/// are a few packets wide.
+const HELD_BATCHES_MAX: u32 = 256;
+
+/// Guest hashes kept for frames the host has not hashed yet. Guests run
+/// behind the host, so honest ones hardly ever need any.
+const EARLY_HASHES_MAX: usize = 1024;
 
 /// A link with nothing new still gets a packet this often (acks, round
 /// trip stamps).
@@ -524,6 +550,8 @@ struct GuestLink {
     last_send: Option<Duration>,
     sent_newest: Option<u32>,
     sent_ack: u32,
+    /// When it last got a gap fill ([`FILL_EVERY`]).
+    last_fill: Option<Duration>,
 }
 
 /// One player's batches as the host receives them.
@@ -1313,13 +1341,17 @@ impl Session {
                 );
             }
             Role::Guest(g) => {
-                let seq = g.next_seq;
-                g.next_seq += 1;
-                g.unacked.push_back(Batch {
-                    seq,
-                    target: frame.tick,
-                    commands: frame.commands,
-                });
+                // Split to fit: the host files batches in order, so one
+                // that never fits a packet would hold back every later one.
+                for commands in wire_batches(frame.commands, &mut self.stats) {
+                    let seq = g.next_seq;
+                    g.next_seq += 1;
+                    g.unacked.push_back(Batch {
+                        seq,
+                        target: frame.tick,
+                        commands,
+                    });
+                }
             }
         }
     }
@@ -1340,8 +1372,29 @@ impl Session {
             .map(|(k, _)| *k)
             .collect();
         let mut frames: Vec<(u8, Vec<SimCommand>)> = Vec::new();
+        // A networked turn stays within [`TURN_BUDGET`]: what does not fit
+        // goes to the next tick, and with it the rest of that player's
+        // commands, so they keep their order.
+        let mut used = 0;
+        let mut behind = std::collections::BTreeSet::new();
         for key in keys {
-            let cmds = h.scheduled.remove(&key).unwrap_or_default();
+            let mut cmds = h.scheduled.remove(&key).unwrap_or_default();
+            if networked {
+                let rest = if behind.contains(&key.1) {
+                    std::mem::take(&mut cmds)
+                } else {
+                    take_fitting(&mut cmds, &mut used, &mut self.stats)
+                };
+                if !rest.is_empty() {
+                    behind.insert(key.1);
+                    let next = (tick + 1, key.1, key.2);
+                    // Ahead of a `Returned` already there behind its
+                    // `Dropped` (`Host::rejoin_seat`).
+                    let later = h.scheduled.remove(&next).unwrap_or_default();
+                    h.scheduled
+                        .insert(next, rest.into_iter().chain(later).collect());
+                }
+            }
             match frames.last_mut() {
                 Some((p, list)) if *p == key.1 => list.extend(cmds),
                 _ => frames.push((key.1, cmds)),
@@ -1374,11 +1427,14 @@ impl Session {
                     match h.hashes.get(&f) {
                         Some(own) if *own != theirs => bad.push(peer),
                         Some(_) => {}
-                        None => h.early.push((peer, f, theirs)),
+                        None if f > frame => h.early.push((peer, f, theirs)),
+                        // Past, and not hashed or no longer kept:
+                        // unverifiable.
+                        None => {}
                     }
                 }
                 if !bad.is_empty() {
-                    self.announce_desync(frame, applied, bad);
+                    self.desynced(frame, applied, bad);
                 }
             }
             Role::Guest(_) => self.send(self.host, Channel::Reliable, Msg::Hash { frame, hash }),
@@ -1400,6 +1456,34 @@ impl Session {
         self.events.push(SessionEvent::Desync(d.clone()));
         self.desync = Some(d);
         true
+    }
+
+    /// Host: `peers` reported a hash other than ours at `frame`. A player
+    /// that disagrees stops the match. A spectator's sim decides nothing,
+    /// and anyone with the room code can be one, so only that spectator
+    /// stops.
+    fn desynced(&mut self, frame: u32, stop_at: u32, peers: Vec<PeerId>) {
+        let Role::Host(h) = &self.role else {
+            return;
+        };
+        let (players, watchers): (Vec<PeerId>, Vec<PeerId>) = peers
+            .into_iter()
+            .partition(|p| h.links.get(p).is_some_and(|l| l.player.is_some()));
+        for peer in watchers {
+            bevy::log::warn!("spectator {peer} disagrees at frame {frame}");
+            self.send(
+                peer,
+                Channel::Reliable,
+                Msg::Desync {
+                    frame,
+                    stop_at,
+                    peers: vec![peer],
+                },
+            );
+        }
+        if !players.is_empty() {
+            self.announce_desync(frame, stop_at, players);
+        }
     }
 
     /// Host: `peers` disagree with us at `frame`. Everyone stops at our
@@ -1746,7 +1830,7 @@ impl Session {
                     }
                 }
             }
-            Msg::Resend { from: tick } => self.fill(from, tick),
+            Msg::Resend { from: tick } => self.fill(from, tick, now),
             Msg::Load { permille, behind } => {
                 let load = PeerLoad {
                     cpu: f32::from(permille) / 1000.0,
@@ -1759,9 +1843,13 @@ impl Session {
                 let own = h.hashes.get(&frame).copied();
                 let newest = h.hashes.last_key_value().map(|(f, _)| *f);
                 match own {
-                    Some(own) if own != hash => self.announce_desync(frame, applied, vec![from]),
+                    Some(own) if own != hash => self.desynced(frame, applied, vec![from]),
                     Some(_) => {}
-                    None if newest.is_none_or(|n| frame > n) => h.early.push((from, frame, hash)),
+                    None if newest.is_none_or(|n| frame > n)
+                        && h.early.len() < EARLY_HASHES_MAX =>
+                    {
+                        h.early.push((from, frame, hash));
+                    }
                     // Older than anything kept: unverifiable (Spring
                     // only warns, `GameServer.cpp:701-709`).
                     None => {}
@@ -1871,10 +1959,21 @@ impl Session {
 
     /// Host: resend turns from `from` to a guest on the reliable channel,
     /// in messages of at most [`MAX_MESSAGE`](super::transport::MAX_MESSAGE) bytes.
-    fn fill(&mut self, to: PeerId, from: u32) {
-        let Role::Host(h) = &self.role else {
+    fn fill(&mut self, to: PeerId, from: u32, now: Duration) {
+        let Role::Host(h) = &mut self.role else {
             return;
         };
+        // No such turn yet: nothing an honest guest asks for.
+        if from >= h.next_cut {
+            return;
+        }
+        let Some(link) = h.links.get_mut(&to) else {
+            return;
+        };
+        if link.last_fill.is_some_and(|at| now < at + FILL_EVERY) {
+            return;
+        }
+        link.last_fill = Some(now);
         let end = h.next_cut.min(from.saturating_add(FILL_MAX)) as usize;
         let mut start = from as usize;
         let mut chunks: Vec<Vec<u8>> = Vec::new();
@@ -1883,8 +1982,8 @@ impl Session {
         // over and over on the way down.
         let mut fit = end - start;
         while start < end {
-            // Halve until it fits (a quiet minute fits in one). A single
-            // turn too big for a message is not sent.
+            // Halve until it fits (a quiet minute fits in one; a single
+            // turn always does, [`TURN_BUDGET`]).
             let mut n = fit.saturating_mul(2).min(end - start);
             loop {
                 let msg = Msg::Fill(TurnRun::of(&h.history[start..start + n]));
@@ -2141,6 +2240,10 @@ impl Host {
         if batch.seq < input.next_seq || input.held.contains_key(&batch.seq) {
             return;
         }
+        if guest && batch.seq - input.next_seq >= HELD_BATCHES_MAX {
+            stats.refused += batch.commands.len() as u64;
+            return;
+        }
         if guest {
             let before = batch.commands.len();
             batch.commands.retain(|c| {
@@ -2167,16 +2270,84 @@ impl Host {
         while let Some(b) = input.held.remove(&input.next_seq) {
             input.next_seq += 1;
             let floor = input.last_target.max(self.next_cut);
+            let target = if guest {
+                b.target.min(self.next_cut.saturating_add(TARGET_AHEAD_MAX))
+            } else {
+                b.target
+            };
             let at = if self.paused {
                 floor
             } else {
-                b.target.max(floor)
+                target.max(floor)
             };
             stats.late_batches += (b.target < self.next_cut) as u64;
             input.last_target = at;
             self.scheduled.insert((at, player, b.seq), b.commands);
         }
     }
+}
+
+/// What `cmd` takes on the wire.
+fn encoded_len(cmd: &SimCommand) -> usize {
+    postcard::to_allocvec(cmd).map_or(usize::MAX, |bytes| bytes.len())
+}
+
+/// A command over [`TURN_BUDGET`] on its own: it could never be sent.
+fn refuse_oversized(len: usize, stats: &mut SessionStats) -> bool {
+    let over = len > TURN_BUDGET;
+    if over {
+        bevy::log::warn!("a {len} byte command dropped: too big for a message");
+        stats.refused += 1;
+    }
+    over
+}
+
+/// Keep in `cmds` what still fits a turn that has `used` bytes of
+/// [`TURN_BUDGET`] taken, and return the rest, in order.
+fn take_fitting(
+    cmds: &mut Vec<SimCommand>,
+    used: &mut usize,
+    stats: &mut SessionStats,
+) -> Vec<SimCommand> {
+    let mut all = std::mem::take(cmds).into_iter();
+    let mut rest = Vec::new();
+    while let Some(cmd) = all.next() {
+        let len = encoded_len(&cmd);
+        if refuse_oversized(len, stats) {
+            continue;
+        }
+        if *used + len > TURN_BUDGET {
+            rest.push(cmd);
+            rest.extend(all);
+            break;
+        }
+        *used += len;
+        cmds.push(cmd);
+    }
+    rest
+}
+
+/// `commands` as batches of at most [`TURN_BUDGET`] each, in order.
+fn wire_batches(commands: Vec<SimCommand>, stats: &mut SessionStats) -> Vec<Vec<SimCommand>> {
+    let mut batches = Vec::new();
+    let mut batch = Vec::new();
+    let mut used = 0;
+    for cmd in commands {
+        let len = encoded_len(&cmd);
+        if refuse_oversized(len, stats) {
+            continue;
+        }
+        if used + len > TURN_BUDGET {
+            batches.push(std::mem::take(&mut batch));
+            used = 0;
+        }
+        used += len;
+        batch.push(cmd);
+    }
+    if !batch.is_empty() {
+        batches.push(batch);
+    }
+    batches
 }
 
 #[cfg(test)]
@@ -2239,6 +2410,160 @@ mod tests {
         h.paused = true;
         h.accept(2, b(0, 40), false, &mut stats);
         assert!(h.scheduled.contains_key(&(10, 2, 0)));
+    }
+
+    /// A guest cannot make the host hold batches without end, nor
+    /// schedule them where they never come up.
+    #[test]
+    fn a_guest_cannot_park_batches() {
+        let mut h = Host::new(DelayBounds::default(), true);
+        h.next_cut = 10;
+        let b = |seq, target| Batch {
+            seq,
+            target,
+            commands: vec![stop()],
+        };
+        let mut stats = SessionStats::default();
+        h.accept(1, b(HELD_BATCHES_MAX, 11), true, &mut stats);
+        assert!(h.inputs[&1].held.is_empty(), "too far past seq 0");
+        assert_eq!(stats.refused, 1);
+        h.accept(1, b(0, u32::MAX), true, &mut stats);
+        let keys: Vec<_> = h.scheduled.keys().copied().collect();
+        assert_eq!(keys, vec![(10 + TARGET_AHEAD_MAX, 1, 0)]);
+        // The host's own commands go where it says.
+        h.accept(2, b(0, u32::MAX), false, &mut stats);
+        assert!(h.scheduled.contains_key(&(u32::MAX, 2, 0)));
+    }
+
+    /// A networked session over `net`, seated by `roster`.
+    fn session(
+        net: &super::super::sim_net::SimNetwork,
+        me: u128,
+        roster: &BTreeMap<PeerId, Option<u8>>,
+    ) -> Session {
+        Session::networked(
+            SessionConfig {
+                match_id: 77,
+                me: PeerId(me),
+                roster: roster.clone(),
+                delay: DelayBounds::default(),
+            },
+            Box::new(net.join(PeerId(me))),
+        )
+    }
+
+    fn host_of(s: &Session) -> &Host {
+        match &s.role {
+            Role::Host(h) => h,
+            Role::Guest(_) => panic!("not the host"),
+        }
+    }
+
+    /// A stop command of about `bytes` on the wire.
+    fn big_stop(bytes: u32) -> SimCommand {
+        // Ids this far apart take three bytes each.
+        let ids = (1..=bytes / 3).map(|i| super::super::NetId(i * 20_000));
+        SimCommand::Stop {
+            units: super::super::Units::of(ids),
+        }
+    }
+
+    /// Requests for turns that do not exist, and hashes for frames that
+    /// never come, cost the host nothing that lasts.
+    #[test]
+    fn bogus_requests_cost_the_host_nothing() {
+        use super::super::sim_net::SimNetwork;
+        let net = SimNetwork::new(1);
+        let roster: BTreeMap<PeerId, Option<u8>> =
+            [(PeerId(1), Some(0)), (PeerId(2), Some(1))].into();
+        let mut host = session(&net, 1, &roster);
+        host.fill(PeerId(2), u32::MAX, Duration::ZERO);
+        assert_eq!(host.stats.gap_fills, 0);
+        let report = |host: &mut Session, frame, hash| {
+            host.handle(PeerId(2), Msg::Hash { frame, hash }, Duration::ZERO);
+        };
+        // A frame the host skipped is dropped once it is past.
+        report(&mut host, 5, 1);
+        report(&mut host, u32::MAX, 1);
+        host.record_hash(30, 9);
+        assert_eq!(host_of(&host).early.len(), 1, "the future one waits");
+        for i in 0..EARLY_HASHES_MAX as u64 + 10 {
+            report(&mut host, u32::MAX, i);
+        }
+        assert_eq!(host_of(&host).early.len(), EARLY_HASHES_MAX);
+        host.cut(Duration::ZERO);
+        host.fill(PeerId(2), 0, Duration::ZERO);
+        host.fill(PeerId(2), 0, Duration::from_millis(1));
+        assert_eq!(host.stats.gap_fills, 1, "one fill per FILL_EVERY");
+        host.fill(PeerId(2), 0, FILL_EVERY);
+        assert_eq!(host.stats.gap_fills, 2);
+    }
+
+    /// Commands too big for one turn spread over several, in order, and
+    /// every turn can be sent. One no message can carry is dropped.
+    #[test]
+    fn turns_stay_within_a_message() {
+        use super::super::sim_net::SimNetwork;
+        let net = SimNetwork::new(2);
+        let roster: BTreeMap<PeerId, Option<u8>> =
+            [(PeerId(1), Some(0)), (PeerId(2), Some(1))].into();
+        let mut host = session(&net, 1, &roster);
+        let big = big_stop(10_000);
+        let batch = |seq: u32, commands| Batch {
+            seq,
+            target: 0,
+            commands,
+        };
+        let mut stats = SessionStats::default();
+        let Role::Host(h) = &mut host.role else {
+            panic!("not the host");
+        };
+        h.accept(1, batch(0, vec![big.clone()]), true, &mut stats);
+        h.accept(1, batch(1, vec![stop(), big.clone()]), true, &mut stats);
+        h.accept(1, batch(2, vec![big_stop(20_000)]), true, &mut stats);
+        h.accept(0, batch(0, vec![big.clone(), stop()]), false, &mut stats);
+        for _ in 0..4 {
+            host.cut(Duration::ZERO);
+        }
+        let h = host_of(&host);
+        assert!(h.scheduled.is_empty());
+        for turn in &h.history {
+            let run = Msg::Fill(TurnRun::of(std::slice::from_ref(turn)));
+            assert!(
+                wire::encode_if_fits(77, &run).is_some(),
+                "turn {} does not fit a message",
+                turn.tick
+            );
+        }
+        let of = |player: u8| -> Vec<SimCommand> {
+            h.history
+                .iter()
+                .flat_map(|t| &t.frames)
+                .filter(|(p, _)| *p == player)
+                .flat_map(|(_, cmds)| cmds.iter().cloned())
+                .collect()
+        };
+        assert_eq!(of(0), vec![big.clone(), stop()]);
+        assert_eq!(of(1), vec![big.clone(), stop(), big.clone()]);
+        assert_eq!(host.stats.refused, 1, "the one too big for any message");
+    }
+
+    /// A guest's frame goes out in batches that fit a packet: a batch that
+    /// does not would hold back all its later ones.
+    #[test]
+    fn a_guests_frame_is_split_to_fit() {
+        use super::super::sim_net::SimNetwork;
+        let net = SimNetwork::new(3);
+        let roster: BTreeMap<PeerId, Option<u8>> =
+            [(PeerId(1), Some(0)), (PeerId(2), Some(1))].into();
+        let mut guest = session(&net, 2, &roster);
+        guest.submit(CommandFrame {
+            tick: 4,
+            player: 1,
+            commands: vec![big_stop(10_000), big_stop(10_000), big_stop(20_000), stop()],
+        });
+        assert_eq!(guest.unacked(), 2);
+        assert_eq!(guest.stats.refused, 1);
     }
 
     #[test]

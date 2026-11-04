@@ -6,10 +6,10 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# The build runs every crate's build script and a downloaded trunk: only
+# the deploy job, which runs neither, may publish.
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 concurrency:
   group: pages
@@ -40,7 +40,7 @@ jobs:
 
       - name: Install trunk
         run: |
-          curl -LsSf https://github.com/trunk-rs/trunk/releases/latest/download/trunk-x86_64-unknown-linux-gnu.tar.gz \
+          curl -LsSf https://github.com/trunk-rs/trunk/releases/download/v0.22.1/trunk-x86_64-unknown-linux-gnu.tar.gz \
             | tar -xz -C ~/.cargo/bin
 
       # The maps are the committed `.kpmap` files (index.html's copy-dir
@@ -57,6 +57,9 @@ jobs:
   deploy:
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

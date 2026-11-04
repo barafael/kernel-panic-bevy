@@ -52,9 +52,11 @@ jobs:
     steps:
       - id: version
         name: Version string
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
           if [ "$GITHUB_EVENT_NAME" = release ]; then
-            version="${{ github.event.release.tag_name }}"
+            version="$RELEASE_TAG"
           elif [ "$GITHUB_REF_TYPE" = tag ]; then
             version="$GITHUB_REF_NAME"
           else
@@ -183,7 +185,7 @@ jobs:
           key: release-web
       - name: Install trunk
         run: |
-          curl -LsSf https://github.com/trunk-rs/trunk/releases/latest/download/trunk-x86_64-unknown-linux-gnu.tar.gz \
+          curl -LsSf https://github.com/trunk-rs/trunk/releases/download/v0.22.1/trunk-x86_64-unknown-linux-gnu.tar.gz \
             | tar -xz -C ~/.cargo/bin
       # Relative public URL: the site works from any directory or host.
       - name: Build
