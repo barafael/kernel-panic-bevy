@@ -95,9 +95,12 @@ impl IdList {
 
 impl Serialize for IdList {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        // Wrapping, as the decoder: a malformed list from a guest (unsorted,
+        // [`Self::raw`]) travels on through the host's turns until every
+        // peer refuses it on apply.
         let mut prev = 0u32;
         s.collect_seq(self.0.iter().map(|id| {
-            let d = id.0 - prev;
+            let d = id.0.wrapping_sub(prev);
             prev = id.0;
             d
         }))
@@ -138,8 +141,13 @@ impl PosList {
 impl Serialize for PosList {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         let mut prev = NetPos::default();
+        // Wrapping, as the decoder: a guest may send any positions.
         s.collect_seq(self.0.iter().map(|p| {
-            let d = (p.x - prev.x, p.y - prev.y, p.z - prev.z);
+            let d = (
+                p.x.wrapping_sub(prev.x),
+                p.y.wrapping_sub(prev.y),
+                p.z.wrapping_sub(prev.z),
+            );
             prev = *p;
             d
         }))
@@ -275,6 +283,23 @@ mod tests {
             println!("{name:<40} {size:>5}");
             assert!(size <= at_most, "{name}: {size} bytes > {at_most}");
         }
+    }
+
+    /// What a guest may send, however malformed, the host can encode again
+    /// for the others, and it arrives as it was sent.
+    #[test]
+    fn malformed_lists_round_trip() {
+        let ids = IdList::raw(vec![NetId(9), NetId(2), NetId(u32::MAX), NetId(0)]);
+        let bytes = postcard::to_allocvec(&ids).unwrap();
+        assert_eq!(postcard::from_bytes::<IdList>(&bytes).unwrap(), ids);
+        let far = |v: i32| NetPos {
+            x: v,
+            y: v.wrapping_neg(),
+            z: v,
+        };
+        let points = PosList(vec![far(i32::MAX), far(i32::MIN), far(0)]);
+        let bytes = postcard::to_allocvec(&points).unwrap();
+        assert_eq!(postcard::from_bytes::<PosList>(&bytes).unwrap(), points);
     }
 
     /// New variants append to the enum: the M0 variants keep their

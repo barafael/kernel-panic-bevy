@@ -20,7 +20,8 @@ use super::driver::{CatchUp, FrameReport, Pacer, drive_frame};
 use super::session::{DelayBounds, Ended, Session, SessionConfig, Timeouts};
 use super::sim_net::{LinkParams, SimNetwork};
 use super::test_support::{self, Fake};
-use super::transport::PeerId;
+use super::transport::{Channel, PeerId, Transport};
+use super::wire::{self, Msg};
 
 const TICK: Duration = Duration::from_nanos(1_000_000_000 / 30);
 
@@ -400,6 +401,56 @@ fn a_desync_stops_everyone_at_the_same_tick() {
     }
     // Detected within one hash interval plus the report's trip.
     assert!(d.stop_at <= 120 + 10, "stopped after {}", d.stop_at);
+}
+
+/// A spectator's hash says nothing about the match: a wrong one stops
+/// that spectator, not the players.
+#[test]
+fn a_spectators_wrong_hash_stops_only_the_spectator() {
+    let net = SimNetwork::new(8);
+    net.set_default_link(LinkParams::latency_ms(1));
+    let roster: BTreeMap<PeerId, Option<u8>> = [
+        (PeerId(1), Some(0)),
+        (PeerId(2), Some(1)),
+        (PeerId(9), None),
+    ]
+    .into();
+    let cfg = SessionConfig {
+        match_id: 77,
+        me: PeerId(1),
+        roster,
+        delay: DelayBounds::default(),
+    };
+    let mut host = Session::networked(cfg, Box::new(net.join(PeerId(1))));
+    let mut guest = net.join(PeerId(2));
+    let mut spectator = net.join(PeerId(9));
+    let hash = |hash| wire::encode(77, Msg::Hash { frame: 30, hash }).unwrap();
+    host.record_hash(30, 111);
+
+    spectator.send(PeerId(1), Channel::Reliable, hash(222));
+    net.advance(ms(5));
+    host.poll(net.now());
+    assert!(host.desync().is_none(), "the match goes on");
+    net.advance(ms(5));
+    let told: Vec<Msg> = spectator
+        .receive(Channel::Reliable)
+        .into_iter()
+        .filter_map(|(_, bytes)| wire::decode(77, &bytes))
+        .collect();
+    assert!(
+        told.iter()
+            .any(|m| matches!(m, Msg::Desync { peers, .. } if *peers == [PeerId(9)])),
+        "the spectator hears of it: {told:?}"
+    );
+    assert!(guest.receive(Channel::Reliable).is_empty());
+
+    guest.send(PeerId(1), Channel::Reliable, hash(222));
+    net.advance(ms(5));
+    host.poll(net.now());
+    assert_eq!(
+        host.desync().map(|d| d.peers.clone()),
+        Some(vec![PeerId(2)])
+    );
 }
 
 /// A guest leaves: its commands stop, everyone else plays on. The host
