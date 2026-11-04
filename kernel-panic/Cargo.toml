@@ -5,6 +5,9 @@ edition = "2024"
 license.workspace = true
 
 [dependencies]
+# A player's seat is its public key; its `Hello` signs its connection id
+# (`net::rejoin`).
+ed25519-dalek = "2"
 # Target-independent float max / min / clamp (workspace clippy.toml).
 spring-detmath = { workspace = true }
 spring-tdf = { path = "../spring-tdf" }
@@ -50,6 +53,8 @@ uuid = "1"
 # `.kpmap` files; the encoder binds the C zstd library, so not on the web.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 spring-map = { path = "../spring-map", features = ["write"] }
+# The player's signing key (`net::rejoin`). Web: `crypto.getRandomValues`.
+getrandom = "0.3"
 
 # Web: the render settings persist in `localStorage`; `Math.random()`
 # seeds the per-launch rolls (`rng::clock_f64`).
@@ -58,7 +63,8 @@ spring-map = { path = "../spring-map", features = ["write"] }
 # Location / History: the room code in the URL fragment (`net::lobby`).
 # HtmlInputElement / FileList / File: the Replays page's "Open file…"
 # (`ui::menu::replays_page`).
-web-sys = { version = "0.3", features = ["Window", "Storage", "Document", "Blob", "BlobPropertyBag", "Url", "HtmlAnchorElement", "Location", "History", "HtmlInputElement", "FileList", "File", "Worker", "MessageEvent", "Event", "EventTarget"] }
+# Crypto: the player's signing key (`net::rejoin`).
+web-sys = { version = "0.3", features = ["Crypto", "Window", "Storage", "Document", "Blob", "BlobPropertyBag", "Url", "HtmlAnchorElement", "Location", "History", "HtmlInputElement", "FileList", "File", "Worker", "MessageEvent", "Event", "EventTarget"] }
 js-sys = "0.3"
 # The `replay` feature's `kp_replay` export and its event-loop yields
 # (`headless`). Both are already linked through Bevy on the web.

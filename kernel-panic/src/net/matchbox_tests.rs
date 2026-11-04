@@ -963,7 +963,7 @@ fn browser_peer() {
 #[ignore = "talks to the deployed signaling server: scripts/signaling-smoke.sh"]
 fn deployed_signaling_smoke() {
     use super::lobby::{Lobby, MapHave};
-    use super::rejoin::PlayerKey;
+    use super::rejoin::PlayerSecret;
 
     let mut cfg = NetConfig::default();
     if let Ok(url) = std::env::var("KP_SIGNALING") {
@@ -1029,7 +1029,7 @@ fn deployed_signaling_smoke() {
         "smoke-a",
         map,
         None,
-        PlayerKey::random(),
+        PlayerSecret::random(),
     );
     let mut lb = Lobby::resume(
         Box::new(b),
@@ -1037,7 +1037,7 @@ fn deployed_signaling_smoke() {
         "smoke-b",
         map,
         None,
-        PlayerKey::random(),
+        PlayerSecret::random(),
     );
     for l in [&mut la, &mut lb] {
         l.provide_map(map, MapHave::Hash(1));

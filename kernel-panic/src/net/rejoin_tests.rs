@@ -19,12 +19,14 @@ use std::time::Duration;
 use super::CommandFrame;
 use super::compat::{Build, Compat};
 use super::driver::{CatchUp, NetSession, NextNetMatch, drive_frame};
-use super::lobby::{Lobby, LobbyEvent, MapHave, StartMsg};
-use super::rejoin::{Door, PlayerKey};
+use super::lobby::{
+    Decoded, Hello, Lobby, LobbyEvent, LobbyMsg, MapHave, StartMsg, decode, encode,
+};
+use super::rejoin::{Door, PlayerKey, PlayerSecret, SeatProof};
 use super::session::{SessionConfig, Timeouts};
 use super::sim_net::{LinkParams, SimNetwork};
 use super::test_support::{self, Fake};
-use super::transport::PeerId;
+use super::transport::{Channel, PeerId, Transport};
 
 const TICK: Duration = Duration::from_nanos(1_000_000_000 / 30);
 const FRAME: Duration = Duration::from_micros(16_667);
@@ -56,7 +58,7 @@ impl Peer {
 struct Room {
     net: SimNetwork,
     peers: Vec<Peer>,
-    keys: BTreeMap<PeerId, PlayerKey>,
+    secrets: BTreeMap<PeerId, PlayerSecret>,
 }
 
 fn start_msg(roster: &BTreeMap<PeerId, Option<u8>>) -> StartMsg {
@@ -78,10 +80,11 @@ fn room(grace: Duration) -> Room {
     net.set_default_link(LinkParams::latency_ms(30));
     let roster: BTreeMap<PeerId, Option<u8>> =
         (0..3).map(|i| (PeerId(i + 1), Some(i as u8))).collect();
-    let keys: BTreeMap<PeerId, PlayerKey> = roster
+    let secrets: BTreeMap<PeerId, PlayerSecret> = roster
         .keys()
-        .map(|p| (*p, PlayerKey(0x100 + p.0 as u64)))
+        .map(|p| (*p, PlayerSecret::from_small_seed(0x100 + p.0 as u64)))
         .collect();
+    let keys: BTreeMap<PeerId, PlayerKey> = secrets.iter().map(|(p, s)| (*p, s.key())).collect();
     let peers = roster
         .iter()
         .map(|(&id, &seat)| {
@@ -123,7 +126,11 @@ fn room(grace: Duration) -> Room {
             }
         })
         .collect();
-    Room { net, peers, keys }
+    Room {
+        net,
+        peers,
+        secrets,
+    }
 }
 
 impl Room {
@@ -152,7 +159,7 @@ impl Room {
 
     /// A newcomer with `key` opens the room as `id`, meets it through
     /// its lobby and joins the running match the host describes.
-    fn knock(&mut self, id: PeerId, key: PlayerKey) -> usize {
+    fn knock(&mut self, id: PeerId, key: PlayerSecret) -> usize {
         let mut lobby = Lobby::new(Box::new(self.net.join(id)), "newcomer", MAP).with_key(key);
         lobby.provide_map(MAP, MapHave::Hash(MAP_HASH));
         for _ in 0..600 {
@@ -219,7 +226,7 @@ fn a_player_back_within_the_grace_keeps_its_seat() {
     r.run(4.0);
     r.net.leave(PeerId(3));
     r.peers[2].present = false;
-    let key = r.keys[&PeerId(3)];
+    let key = r.secrets[&PeerId(3)].clone();
     r.run(2.0);
     let i = r.knock(PeerId(0), key);
     r.run(6.0);
@@ -269,10 +276,10 @@ fn a_dropped_player_returns_and_a_newcomer_watches() {
     r.net.leave(PeerId(2));
     r.peers[1].present = false;
     r.run(2.0);
-    let key = r.keys[&PeerId(2)];
+    let key = r.secrets[&PeerId(2)].clone();
     let back = r.knock(PeerId(40), key);
     r.run(3.0);
-    let watcher = r.knock(PeerId(41), PlayerKey(0xbeef));
+    let watcher = r.knock(PeerId(41), PlayerSecret::from_small_seed(0xbeef));
     r.run(5.0);
     r.assert_agree(350);
     let leaves = r.peers[0].sim.leaves.clone();
@@ -348,10 +355,10 @@ fn the_turn_log_plays_back() {
 fn back_in_the_room_is_not_a_knock() {
     let mut r = room(Duration::from_secs(30));
     r.run(3.0);
-    let key = r.keys[&PeerId(3)];
+    let key = r.secrets[&PeerId(3)].clone();
     let (transport, connected) = r.peers[2].net.session.hand_back().expect("a transport");
     r.peers[2].present = false;
-    let mut back = Lobby::resume(transport, &connected, "p3", MAP, None, key);
+    let mut back = Lobby::resume(transport, &connected, "p3", MAP, None, key.clone());
     back.provide_map(MAP, MapHave::Hash(MAP_HASH));
     // The same player's page reloads in the room: a new connection, the
     // same key.
@@ -387,10 +394,69 @@ fn back_in_the_room_is_not_a_knock() {
             .all(|q| q.peer != PeerId(50)),
         "the reload is not in the match"
     );
-    let watcher = r.knock(PeerId(51), PlayerKey(0xbeef));
+    let watcher = r.knock(PeerId(51), PlayerSecret::from_small_seed(0xbeef));
     r.run(3.0);
     assert_eq!(r.peers[watcher].net.session.player(), None);
     r.assert_agree(150);
+}
+
+/// Everyone in the room hears a player's `Hello`, key and all. Sent again
+/// from another connection, or with a proof made up, it gets no seat: the
+/// player keeps playing, nobody is told it left, and the other connection
+/// watches like any stranger. The owner of the key still gets back in.
+#[test]
+fn a_copied_hello_takes_no_seat() {
+    let mut r = room(Duration::from_secs(30));
+    r.run(3.0);
+    let victim = PeerId(3);
+    let secret = r.secrets[&victim].clone();
+    let hello = |proof| {
+        encode(LobbyMsg::Hello(Box::new(Hello {
+            name: "p3".into(),
+            build: Build::current(),
+            room: None,
+            key: secret.key(),
+            proof,
+        })))
+        .unwrap()
+    };
+    let mine = |r: &Room| {
+        let applied = &r.peers[0].sim.applied;
+        applied.keys().filter(|id| *id / 10_000 == 303).count()
+    };
+    let before = mine(&r);
+    let mut thieves = Vec::new();
+    for (id, proof) in [
+        (PeerId(60), secret.proof(victim)),
+        (PeerId(61), SeatProof::default()),
+    ] {
+        let mut t = r.net.join(id);
+        r.run(0.5);
+        t.send(PeerId(1), Channel::Reliable, hello(proof));
+        thieves.push((id, t));
+    }
+    r.run(4.0);
+    assert!(mine(&r) > before, "the player still plays");
+    let peers = r.peers[0].net.session.peers();
+    let on_seat = |seat, peer| peers.iter().any(|q| q.peer == peer && q.player == seat);
+    assert!(on_seat(Some(2), victim), "still its seat: {peers:?}");
+    assert!(r.peers[0].sim.leaves.is_empty(), "nothing sequenced");
+    for (id, t) in &mut thieves {
+        assert!(on_seat(None, *id), "{id} watches: {peers:?}");
+        t.poll_peers();
+        let running =
+            t.receive(Channel::Reliable)
+                .into_iter()
+                .find_map(|(_, b)| match decode(&b) {
+                    Decoded::Msg(LobbyMsg::Running(running)) => Some(running),
+                    _ => None,
+                });
+        let roster = running.expect("told of the match").start.roster;
+        assert!(roster.contains(&(*id, None)), "{id}: {roster:?}");
+    }
+    r.assert_agree(200);
+    let back = r.knock(PeerId(62), secret);
+    assert_eq!(r.peers[back].net.session.player(), Some(2));
 }
 
 // --- the whole game ------------------------------------------------------
@@ -405,7 +471,7 @@ mod full {
     use crate::net::compat::{Build, Compat};
     use crate::net::driver::{CatchUp, DumpDir, NetSession, NetStatus, NextNetMatch};
     use crate::net::lobby::{Lobby, LobbyEvent, MapHave, StartMsg, encode_setup};
-    use crate::net::rejoin::{Door, PlayerKey};
+    use crate::net::rejoin::{Door, PlayerKey, PlayerSecret};
     use crate::net::session::{SessionConfig, Timeouts};
     use crate::net::sim_net::{LinkParams, SimNetwork};
     use crate::net::transport::PeerId;
@@ -427,7 +493,7 @@ mod full {
     struct Room {
         net: SimNetwork,
         peers: Vec<FullPeer>,
-        keys: BTreeMap<PeerId, PlayerKey>,
+        secrets: BTreeMap<PeerId, PlayerSecret>,
         map_hash: u64,
         dumps: std::path::PathBuf,
     }
@@ -478,10 +544,12 @@ mod full {
             net.set_default_link(LinkParams::latency_ms(35));
             let roster: BTreeMap<PeerId, Option<u8>> =
                 (0..3u8).map(|i| (PeerId(i as u128 + 1), Some(i))).collect();
-            let keys: BTreeMap<PeerId, PlayerKey> = roster
+            let secrets: BTreeMap<PeerId, PlayerSecret> = roster
                 .keys()
-                .map(|p| (*p, PlayerKey(0x7000 + p.0 as u64)))
+                .map(|p| (*p, PlayerSecret::from_small_seed(0x7000 + p.0 as u64)))
                 .collect();
+            let keys: BTreeMap<PeerId, PlayerKey> =
+                secrets.iter().map(|(p, s)| (*p, s.key())).collect();
             let dumps = crate::paths::project_root()
                 .join("target")
                 .join(format!("rejoin-dumps-{seed:x}"));
@@ -542,7 +610,7 @@ mod full {
             Self {
                 net,
                 peers,
-                keys,
+                secrets,
                 map_hash,
                 dumps,
             }
@@ -583,7 +651,7 @@ mod full {
         /// A newcomer with `key` opens the room as `id`; once its lobby
         /// has the host's `Running`, it loads the match the way the game
         /// does and joins late.
-        fn knock(&mut self, id: PeerId, key: PlayerKey) -> usize {
+        fn knock(&mut self, id: PeerId, key: PlayerSecret) -> usize {
             let mut lobby = Lobby::new(Box::new(self.net.join(id)), "late", MAP).with_key(key);
             lobby.provide_map(MAP, MapHave::Hash(self.map_hash));
             for _ in 0..300 {
@@ -666,10 +734,10 @@ mod full {
             .dropped
             .contains(&1);
         assert!(dropped_seen, "seat 1 was dropped");
-        let key = r.keys[&PeerId(2)];
+        let key = r.secrets[&PeerId(2)].clone();
         let back = r.knock(PeerId(20), key);
         r.run(60);
-        let watcher = r.knock(PeerId(21), PlayerKey(0xfeed));
+        let watcher = r.knock(PeerId(21), PlayerSecret::from_small_seed(0xfeed));
         while r.tick(0) < 560 {
             r.run(30);
         }

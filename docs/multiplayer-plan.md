@@ -337,9 +337,10 @@ in-process `SimNetwork` per room code); the page shows `Transport::failure`. A d
   it now brings its own STUN server and rejoins a stalled room.
 
 **Turn log (agent H) — done** (`net-experiments/m3-turn-log.md`): the host keeps
-every turn of the match. Seats belong to a `PlayerKey` (random; per browser tab in
-`sessionStorage`, so a reload keeps it; per process natively, `KP_PLAYER_KEY`), sent
-in the lobby `Hello`. A newcomer's `Hello` reaches the running host's session, which
+every turn of the match. Seats belong to a `PlayerKey`, an Ed25519 public key (the
+secret half per browser tab in `sessionStorage`, so a reload keeps it; per process
+natively, `KP_PLAYER_KEY`), sent in the lobby `Hello` with a signature over the
+sender's connection id. A newcomer's `Hello` reaches the running host's session, which
 answers `LobbyMsg::Running` (the `Start` with the roster as it is now): the seat's
 key gets the seat back (the old connection leaves the roster), any other watches;
 `Msg::Joined` tells the guests. The newcomer loads the match and replays the whole
@@ -444,11 +445,10 @@ same turns and keeps the whole log, so any survivor can carry on sequencing.
   stay unconnected (M2; M3's stuck-room reopen covers both directions now). A
   survivor without a link to the successor rejoins through the M3 path (knock, catch
   up from the new host's log). Measure under netem how often that happens.
-- **Seat keys:** every lobby `Hello` carries the `PlayerKey` in the clear, so any
-  peer could claim another player's seat (open since the H + I merge). Instead, the
-  room publishes a commitment per seat (a hash of the key), and the key itself goes
-  only to the host, on the host link. A successor checks claimants against the
-  commitments.
+- **Seat keys:** done, and nothing to hand over: the `Hello`'s `PlayerKey` is public
+  and its proof holds for the sender's own connection only (`net/rejoin.rs`), so a
+  successor checks a claimant the way the host does. The successor needs the `Door`'s
+  keys, which every peer can collect from the hellos it heard.
 - **Tests (full sim, identical trails on every survivor):**
   - the host leaving at random ticks in rooms of 3–8
   - batches in flight at that moment: no command lost, none applied twice
