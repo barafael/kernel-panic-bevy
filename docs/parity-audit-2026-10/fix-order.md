@@ -59,6 +59,35 @@ Water price in speed and path cost, horizontal speed regulation on slopes
 DOS sub-beams with range falloff, arc line of fire against terrain,
 Worm bite range to the near surface, yardmap facing, morph timing.
 
-## Left for the end / not attempted
+## Status (2026-11-09)
 
-See the list in the final report.
+Batches 1-5 below are in commits 03c1723 and 6755798 (SIM_VERSION 22,
+goldens re-recorded, `cargo test -p spring-tdf -p kernel-panic` and clippy
+clean). Done from batch 5: Obelisk shell, cannon arc line of fire.
+Not done from batch 5 (see below): DOS sub-beams, Worm bite range,
+yardmap facing, morph timing.
+
+## Still open (observed in-parities)
+
+- Vent reservation: any team's build order claims a datavent, the ghost
+  and the AI read it (`VentClaim`; units-construction #2). The AI relies
+  on the claim to spread its constructors, so it needs its own tracking
+  before the claim can go.
+- Ghosted buildings (scouted enemy buildings vanish), radar icons and
+  minimap blips for radar contacts, a Worm's radar 5 s after it is built.
+- Builders cannot repair; right-click on a damaged ally is Guard for all.
+- Bug <-> Exploit morph is instant (no 5 s gates, 2.9 s animation, queue
+  copy, non-blocking result); a finished Bad Block is despawned without
+  the Virus release.
+- DOS and Gauss beams land in one instant (no sub-beams, no range
+  falloff, 8-frame salvo); Worm bite range is to the midpoint.
+- Yardmap facing for asymmetric Sockets/Windows; Signal flight is only as
+  verified as the thrust/turn-radius change.
+- Unlit unit/terrain materials (no sun/ambient, Bevy tonemapping).
+- KPAI flavour: the Fair budget runs at every difficulty.
+- Minimap has no minimap-drawn orders/formations; Enter as a targeted E;
+  gadget commands cannot be Shift-queued; Packets on an enemy teleporter
+  attack instead of being refused.
+- Fight diverts and idle engagement ignore the Fire State (no hold-fire
+  setting exists); the fight resume uses the leg's goal, not the engine's
+  re-pathed line.
