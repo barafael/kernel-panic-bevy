@@ -283,10 +283,10 @@ fn collect_commands(
                 repeat: producer.map(|p| p.repeat()),
                 queued,
                 autohold: autohold.map(|a| a.0),
-                // The button only ever shows whole seconds
-                // (`recharge_label` ceils), so round here: the state
-                // then changes once a second instead of every frame.
-                recharge: cooldown.map(|c| c.remaining.ceil()),
+                // The button only ever shows whole gadget "seconds"
+                // (`recharge_label` ceils), so count them here: the
+                // state then changes once a label instead of every frame.
+                recharge: cooldown.map(|c| commands::recharge_label_seconds(c.remaining)),
             }
         })
         .collect();
@@ -811,10 +811,12 @@ mod tests {
         assert!(world.resource::<PanelCommands>().list.is_empty());
     }
 
-    /// A recharging Terminal's state is kept in whole seconds, so the
-    /// command list is only rebuilt when the shown countdown changes.
+    /// A recharging Terminal's state is kept in whole label seconds (the
+    /// gadgets count 32 frames to the "second": 96 real seconds read 90),
+    /// so the command list is only rebuilt when the shown countdown
+    /// changes.
     #[test]
-    fn recharge_state_changes_once_a_second() {
+    fn recharge_state_changes_once_a_label() {
         let mut world = World::new();
         world.init_resource::<PanelCommands>();
         world.init_resource::<PanelPage>();
@@ -823,25 +825,32 @@ mod tests {
             .spawn((
                 UnitType(UnitKind::Terminal),
                 TeamId(0),
-                CommandFireCooldown { remaining: 41.2 },
+                CommandFireCooldown { remaining: 42.0 },
                 Selected,
             ))
             .id();
         world.run_system_once(collect_commands).unwrap();
         let first = world.resource::<PanelCommands>().states.clone();
-        assert_eq!(first[0].recharge, Some(42.0));
-        assert_eq!(world.resource::<PanelCommands>().list[0].label(), "42s");
+        assert_eq!(first[0].recharge, Some(40.0));
+        assert_eq!(world.resource::<PanelCommands>().list[0].label(), "40s");
 
         world
             .entity_mut(terminal)
-            .insert(CommandFireCooldown { remaining: 41.7 });
+            .insert(CommandFireCooldown { remaining: 41.8 });
         world.run_system_once(collect_commands).unwrap();
         assert_eq!(world.resource::<PanelCommands>().states, first);
 
         world
             .entity_mut(terminal)
-            .insert(CommandFireCooldown { remaining: 40.9 });
+            .insert(CommandFireCooldown { remaining: 41.0 });
         world.run_system_once(collect_commands).unwrap();
-        assert_eq!(world.resource::<PanelCommands>().list[0].label(), "41s");
+        assert_eq!(world.resource::<PanelCommands>().list[0].label(), "39s");
+
+        // A fresh Terminal starts at 96 real seconds and reads 90.
+        world.entity_mut(terminal).insert(CommandFireCooldown {
+            remaining: crate::units::mechanics::command_fire::LUA_ABILITY_RELOAD,
+        });
+        world.run_system_once(collect_commands).unwrap();
+        assert_eq!(world.resource::<PanelCommands>().list[0].label(), "90s");
     }
 }

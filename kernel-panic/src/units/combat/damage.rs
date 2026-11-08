@@ -440,6 +440,19 @@ impl DamageResolver<'_, '_> {
         if dying {
             return;
         }
+        // `if (isDead) return`: upstream `KillUnit` runs inside the lethal
+        // `DoDamage`, so nothing after it reaches the unit. Here
+        // `death_system` only marks the kill later in the frame, so a unit
+        // already at 0 HP is dead for the hits behind the lethal one — no
+        // posthumous infection, Firewall reflection or damage-log entry.
+        if self
+            .hits
+            .health
+            .get(hit.target)
+            .is_ok_and(|health| health.current <= 0.0)
+        {
+            return;
+        }
         let (kind, team, faction, pos) = (unit.0, team.0, *faction, gtf.translation());
         let paralyzer = hit.paralyze_time.is_some();
 
@@ -1455,6 +1468,30 @@ mod tests {
                 ..Default::default()
             },
         )
+    }
+
+    /// `CUnit::DoDamage` starts with `if (isDead) return`, and `KillUnit`
+    /// runs inside the lethal hit: whatever lands behind it the same frame
+    /// finds a dead unit. Here `death_system` marks the kill later, so a
+    /// unit already at 0 HP must refuse the rest itself — no overkill, no
+    /// second infector taking over the Virus the first one earned.
+    #[test]
+    fn a_unit_at_zero_hp_takes_no_further_hits() {
+        let mut weapons = WeaponRegistry::default();
+        let beam = flat_weapon(&mut weapons, WeaponKind::VirusBeam, 150.0);
+        let mut app = damage_app(weapons, UnitRegistry::empty());
+        let victim = unit(&mut app, UnitKind::Bit, 0, Vec3::ZERO, 100.0);
+        let first = unit(&mut app, UnitKind::Virus, 1, Vec3::X * 300.0, 100.0);
+        let second = unit(&mut app, UnitKind::Virus, 2, Vec3::Z * 300.0, 100.0);
+        for attacker in [first, second] {
+            app.world_mut()
+                .resource_mut::<DamageQueue>()
+                .push(shot(Some(victim), attacker, beam, Vec3::ZERO));
+        }
+        run_damage(&mut app);
+        assert_eq!(hp(&app, victim), -50.0, "the lethal hit only");
+        let infected = app.world().get::<Infected>(victim).expect("infected");
+        assert_eq!(infected.attacker_team, 1, "the first infector keeps it");
     }
 
     /// network_reflectorshield.lua: a protected unit takes half and an

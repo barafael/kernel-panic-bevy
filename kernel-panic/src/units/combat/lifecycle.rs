@@ -13,7 +13,7 @@ use bevy::ecs::world::DeferredWorld;
 use bevy::prelude::*;
 
 use super::damage::{DamageQueue, Infected, PendingDamage, VirusSpawn, VirusSpawnQueue};
-use super::{IdleTimer, StunCharge};
+use super::{AttackCooldown, IdleTimer, StunCharge};
 use crate::net::NetId;
 use crate::sim::{DetFloat, INV_GAME_SPEED, SLOW_UPDATE_RATE, SimTick, slow_update_due};
 use crate::units::assets::animation::UnitAnimator;
@@ -161,6 +161,21 @@ pub fn auto_heal(
     }
 }
 
+/// `CUnit::Update`'s stunned branch (Unit.cpp:680-687): "paralyzed
+/// weapons shouldn't reload" — every weapon's `reloadStatus` is bumped
+/// by one a frame while the unit is stunned, so each stunned frame
+/// pushes the next shot back a frame. A weapon that was already ready
+/// stays ready; one that had just fired still owes the rest of its
+/// reload once the stun lifts (a stunned Pointer recovers into its
+/// remaining 4 s, not into an instant shot).
+pub fn freeze_reload_while_stunned(
+    mut stunned: Query<&mut AttackCooldown, (With<Stunned>, Without<Dying>)>,
+) {
+    for mut cooldown in &mut stunned {
+        cooldown.ready_frame += 1;
+    }
+}
+
 /// `CUnit::SlowUpdate`'s paralysis half (Unit.cpp:991-1012), on each
 /// unit's slow update: the meter drains `maxHealth · 15/30 · 1/40`
 /// (never below zero), stunned or not, then a stunned unit whose meter
@@ -208,7 +223,12 @@ pub fn tick_stun(
 /// *is* that one; queueing the weapon here as well detonated it twice.
 #[allow(clippy::type_complexity)]
 pub fn tick_kamikaze(
-    bombs: Query<(Entity, &Kamikaze, &TeamId, &GlobalTransform), Without<Dying>>,
+    // `CUnit::SlowUpdate` returns from its stunned branch before
+    // `SlowUpdateKamikaze`: a paralyzed bomb does not scan.
+    bombs: Query<
+        (Entity, &Kamikaze, &TeamId, &GlobalTransform),
+        (Without<Dying>, Without<Stunned>),
+    >,
     mut health_q: Query<&mut Health>,
     spatial: Res<SpatialIndex>,
     alliances: Res<Alliances>,
@@ -398,10 +418,15 @@ pub fn death_system(
 /// Tick every [`SelfDestructCountdown`] and, when it reaches zero,
 /// drop the unit's HP to zero so `death_system` takes over — the
 /// existing `ExplodeAs` pipeline spawns the death AoE, so this stays
-/// a tiny bridge instead of a parallel detonation path.
+/// a tiny bridge instead of a parallel detonation path. A paralyzed
+/// unit's countdown stands still (`CUnit::SlowUpdate` returns from its
+/// stunned branch before the `selfDCountdown` decrement).
 pub fn tick_self_destruct(
     time: Res<Time>,
-    mut query: Query<(&mut SelfDestructCountdown, &mut Health), Without<Dying>>,
+    mut query: Query<
+        (&mut SelfDestructCountdown, &mut Health),
+        (Without<Dying>, Without<Stunned>),
+    >,
 ) {
     let dt = time.delta_secs();
     for (mut countdown, mut health) in &mut query {
@@ -584,6 +609,93 @@ mod tests {
         world.get_mut::<Health>(other).unwrap().current = 0.0;
         run_resolve(&mut world);
         assert!(world.get::<Dying>(other).is_some());
+    }
+
+    /// `CUnit::SlowUpdate` returns from its stunned branch before the
+    /// self-destruct countdown ticks and before `SlowUpdateKamikaze`:
+    /// a paralyzed unit neither runs out its countdown nor triggers.
+    #[test]
+    fn paralysis_pauses_self_destruct_and_kamikaze() {
+        let mut world = resolve_world(UnitRegistry::empty(), WeaponRegistry::default());
+        let countdown = world
+            .spawn((
+                UnitType(UnitKind::Bit),
+                Faction::System,
+                GlobalTransform::default(),
+                Health::full(100.0),
+                SelfDestructCountdown { remaining: 0.0 },
+                Stunned,
+            ))
+            .id();
+        world.run_system_once(tick_self_destruct).unwrap();
+        assert_eq!(world.get::<Health>(countdown).unwrap().current, 100.0);
+        // The countdown resumes, and still holds its time, once the stun lifts.
+        world.entity_mut(countdown).remove::<Stunned>();
+        world.run_system_once(tick_self_destruct).unwrap();
+        assert_eq!(world.get::<Health>(countdown).unwrap().current, 0.0);
+
+        use crate::units::spatial::SpatialEntry;
+        let bomb = world
+            .spawn((
+                UnitType(UnitKind::LogicBomb),
+                Faction::Hacker,
+                TeamId(0),
+                GlobalTransform::default(),
+                Health::full(100.0),
+                Kamikaze {
+                    trigger_radius: 64.0,
+                },
+                Stunned,
+            ))
+            .id();
+        let enemy = world.spawn_empty().id();
+        let mut spatial = SpatialIndex::default();
+        spatial.insert_for_test(SpatialEntry {
+            entity: enemy,
+            pos: Vec3::new(30.0, 0.0, 0.0),
+            hit_radius: 8.0,
+            mid_y: 0.0,
+            up: Vec3::Y,
+            team: 1,
+            kind: UnitKind::Bit,
+            hp_positive: true,
+            is_flying: false,
+            cloaked: false,
+            detected_by: 0,
+            feature: false,
+        });
+        world.insert_resource(spatial);
+        world.init_resource::<Alliances>();
+        world.run_system_once(tick_kamikaze).unwrap();
+        assert_eq!(world.get::<Health>(bomb).unwrap().current, 100.0);
+        world.entity_mut(bomb).remove::<Stunned>();
+        world.run_system_once(tick_kamikaze).unwrap();
+        assert_eq!(world.get::<Health>(bomb).unwrap().current, 0.0);
+    }
+
+    /// A stunned unit's reload stands still (`++reloadStatus` each
+    /// stunned frame): the shot it owes is pushed back by the stun's
+    /// length, and a ready weapon stays ready.
+    #[test]
+    fn paralysis_freezes_the_reload() {
+        let mut world = World::new();
+        let owes = world
+            .spawn((AttackCooldown { ready_frame: 100 }, Stunned))
+            .id();
+        let free = world.spawn(AttackCooldown { ready_frame: 100 }).id();
+        for _ in 0..3 {
+            world.run_system_once(freeze_reload_while_stunned).unwrap();
+        }
+        assert_eq!(world.get::<AttackCooldown>(owes).unwrap().ready_frame, 103);
+        assert_eq!(world.get::<AttackCooldown>(free).unwrap().ready_frame, 100);
+        // Ready stays ready: the offset to the clock is what is kept.
+        let ready = world
+            .spawn((AttackCooldown { ready_frame: 40 }, Stunned))
+            .id();
+        for frame in 41..=60u64 {
+            world.run_system_once(freeze_reload_while_stunned).unwrap();
+            assert!(world.get::<AttackCooldown>(ready).unwrap().ready(frame));
+        }
     }
 
     /// A unit dying tilted on a ramp bursts square to the ramp: its

@@ -279,6 +279,11 @@ impl Plugin for UnitsPlugin {
                         .chain()
                         .in_set(GameplaySet::Simulate),
                     (
+                        // Before the damage drain, as `CUnit::Update`
+                        // runs before the frame's projectile impacts: a
+                        // unit stunned by this frame's hit freezes from
+                        // the next.
+                        combat::freeze_reload_while_stunned,
                         combat::apply_damage.run_if(
                             |q: Res<combat::DamageQueue>, d: Res<combat::DelayedDamage>| {
                                 !q.is_empty() || !d.is_empty()

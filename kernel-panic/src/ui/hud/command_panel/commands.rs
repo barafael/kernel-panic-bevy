@@ -208,7 +208,8 @@ pub(crate) struct UnitCmdState {
     pub queued: Vec<(UnitKind, u32)>,
     /// Worm: the AutoHold toggle.
     pub autohold: Option<bool>,
-    /// Seconds until a Terminal / Firewall recharges (> 0 = recharging).
+    /// The recharging Terminal's / Firewall's countdown in the gadgets'
+    /// 32-frame "seconds" ([`recharge_label_seconds`]; > 0 = recharging).
     pub recharge: Option<f32>,
 }
 
@@ -260,6 +261,16 @@ fn is_mobile(kind: UnitKind) -> bool {
 /// `math.ceil((readyFrame - now) / 32) .. "s"`.
 pub(crate) fn recharge_label(seconds: f32) -> String {
     format!("{}s", seconds.ceil().det_max(1.0) as u32)
+}
+
+/// What the label counts for a cooldown with `remaining` real seconds
+/// left (`UnitCmdState::recharge`): the gadgets' "seconds" are 32 sim
+/// frames long, so at 30 frames a second the 90 s reload
+/// ([`crate::units::mechanics::command_fire::LUA_ABILITY_RELOAD`], 96 real
+/// seconds) starts the countdown at 90, and it runs 1/16 slower than the
+/// clock. Whole numbers, so the panel only rebuilds when the label does.
+pub(crate) fn recharge_label_seconds(remaining: f32) -> f32 {
+    (remaining * 30.0 / 32.0).ceil()
 }
 
 /// The keypad keys `kp_hotkeys.lua` binds to `buildunit_<minifac>`.

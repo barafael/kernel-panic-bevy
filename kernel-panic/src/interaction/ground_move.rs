@@ -1070,9 +1070,11 @@ impl FrameStats {
     }
 }
 
-/// Spring's `Sign` (≥ 0 → +1).
+/// Spring's `Sign` (`SpringMath.h`: `(v > 0) * 2 - 1`): zero is negative,
+/// so an exact tie — a perfectly aligned head-on pair, a push along the
+/// facing — resolves the engine's way round.
 fn sign(x: f32) -> f32 {
-    if x >= 0.0 { 1.0 } else { -1.0 }
+    if x > 0.0 { 1.0 } else { -1.0 }
 }
 
 /// `SignedSquare`.
@@ -3009,6 +3011,15 @@ mod tests {
 
     fn mover_speed(h: &Harness, e: Entity) -> f32 {
         h.world.get::<GroundMover>(e).unwrap().current_speed * GAME_SPEED
+    }
+
+    /// `Sign(0)` is -1 in the engine (`SpringMath.h`: "zero is negative!").
+    #[test]
+    fn sign_of_zero_is_negative() {
+        assert_eq!(sign(0.0), -1.0);
+        assert_eq!(sign(-0.0), -1.0);
+        assert_eq!(sign(0.25), 1.0);
+        assert_eq!(sign(-3.0), -1.0);
     }
 
     /// A Bit (`Acceleration=0.9` elmo/frame², `MaxVelocity=3`) reaches

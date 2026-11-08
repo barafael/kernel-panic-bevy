@@ -58,7 +58,7 @@ pub use damage::{
 };
 pub use lifecycle::{
     Dying, PARALYZE_DECLINE, SelfDestructCountdown, Stunned, auto_heal, cleanup_dying,
-    death_system, tick_kamikaze, tick_self_destruct, tick_stun,
+    death_system, freeze_reload_while_stunned, tick_kamikaze, tick_self_destruct, tick_stun,
 };
 
 /// Player-issued order to fire the unit's weapon at a fixed ground position.
@@ -740,7 +740,10 @@ fn flat_forward(forward: Vec3) -> Vec3 {
 /// The weapon's reload (`CWeapon::reloadStatus`): the sim frame from
 /// which it may fire again. Frame-exact like the engine — a countdown of
 /// `f32` seconds drifted and finished a frame late. Being an absolute
-/// frame it keeps running while the unit is stunned, as upstream.
+/// frame it would run on while the unit is stunned, but upstream
+/// freezes it ("paralyzed weapons shouldn't reload", `CUnit::Update`
+/// bumps every `reloadStatus` per stunned frame):
+/// [`freeze_reload_while_stunned`] pushes it back a frame per frame.
 #[derive(Component, Clone, Copy, Debug)]
 pub struct AttackCooldown {
     pub ready_frame: u64,

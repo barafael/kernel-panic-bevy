@@ -1043,14 +1043,22 @@ pub(super) fn tick_ceg_particles(
 
         // The camera-facing (xdir, ydir) pair upstream spans the quad
         // with: corners at `±xdir*size ± ydir*size`.
-        let (xdir, ydir) = if p.directional && p.velocity.length_squared() > 1e-3 {
-            // `directional=1` (hline tracers): align Y with velocity,
-            // X with the camera-facing perpendicular.
+        //
+        // `directional=1` (hline tracers), SimpleParticleSystem.cpp:
+        // `ydir = zdir × speed`, `xdir = ydir × zdir` — the texture's U
+        // runs *along* the motion and V across it, so the streaks point
+        // the way the sparks fly. A particle flying along the view axis
+        // (`|zdir × speed|² <= 0.001` in elmos per frame, 0.9 per second
+        // squared here) keeps the camera's axes.
+        let (xdir, ydir) = if p.directional {
             let zdir = (p.pos - cam_pos).normalize_or(-cam_fwd);
-            let fwd = p.velocity.normalize();
-            let xdir = zdir.cross(fwd).normalize_or(cam_right);
-            let ydir = xdir.cross(zdir).normalize_or(fwd);
-            (xdir, ydir)
+            let across = zdir.cross(p.velocity);
+            if across.length_squared() > 0.9 {
+                let ydir = across.normalize();
+                (ydir.cross(zdir), ydir)
+            } else {
+                (cam_right, cam_up)
+            }
         } else {
             (cam_right, cam_up)
         };

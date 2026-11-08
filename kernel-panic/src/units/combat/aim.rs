@@ -260,8 +260,10 @@ pub fn weapon_range_2d(
             weapon.projectile_speed(),
             weapon_gravity(weapon, map_gravity),
         ),
-        // `CStarburstLauncher::GetRange2D`.
-        C::StarburstLauncher => range + ydiff,
+        // `CStarburstLauncher::GetRange2D(0, ydiff)` is `range + ydiff *
+        // heightmod`, and `TestRange` has already passed it `heightDiff *
+        // heightmod`: the height counts through `heightmod` twice.
+        C::StarburstLauncher => range + ydiff * height_mod(weapon),
         _ => (range * range - ydiff * ydiff).det_max(0.0).sqrt(),
     }
 }
@@ -657,6 +659,22 @@ pub(crate) mod tests {
             ..w
         };
         assert_eq!(weapon_gravity(&plain, G), G);
+    }
+
+    /// A starburst rocket's reach rises `heightDiff · heightmod²` with the
+    /// target (`CStarburstLauncher::GetRange2D` multiplies `TestRange`'s
+    /// already scaled height by `heightmod` again): the Flow's 350 elmos
+    /// are 345 against ground targets 140 elmos below it, not 322.
+    #[test]
+    fn starburst_range_applies_heightmod_twice() {
+        let flow = spring_tdf::WeaponDef {
+            weapon_type: "StarburstLauncher".into(),
+            range: 350.0,
+            ..Default::default()
+        };
+        assert!((weapon_range_2d(&flow, 0.0, false, G) - 350.0).abs() < 1e-3);
+        assert!((weapon_range_2d(&flow, -140.0, false, G) - 344.4).abs() < 1e-3);
+        assert!((weapon_range_2d(&flow, 100.0, false, G) - 354.0).abs() < 1e-3);
     }
 
     /// `CCannon::CalcWantedDir`: uphill targets need a steeper launch,
