@@ -315,25 +315,36 @@ pub fn turn_into_features(
             Option<&UnitColor>,
             &Transform,
             &NetId,
+            Option<&crate::units::combat::Infected>,
         ),
         (Without<Emerging>, Without<Dying>),
     >,
     registry: Res<UnitRegistry>,
+    mut virus_spawns: ResMut<crate::units::combat::VirusSpawnQueue>,
     mut assets: FeatureAssets,
     mut commands: Commands,
 ) {
     let defs = &crate::units::content::defs::defs().features;
     let mut finished: Vec<_> = units
         .iter()
-        .filter_map(|(entity, kind, faction, color, tf, id)| {
+        .filter_map(|(entity, kind, faction, color, tf, id, infected)| {
             let def = defs.get(registry.finished_feature(kind.0)?)?;
             let color = color.map_or(TeamColor::of_faction(*faction), |c| c.0);
-            Some((*id, entity, def, color, tf.translation))
+            Some((*id, entity, def, color, tf.translation, infected.cloned()))
         })
         .collect();
     finished.sort_unstable_by_key(|(id, ..)| *id);
-    for (_, entity, def, color, pos) in finished {
+    for (_, entity, def, color, pos, infected) in finished {
         commands.entity(entity).despawn();
+        // `UnitDestroyed` runs for it too: an infected frame still
+        // releases its Virus (infection.lua).
+        if let Some(infected) = infected {
+            virus_spawns.push(crate::units::combat::VirusSpawn {
+                position: pos,
+                faction: infected.attacker_faction,
+                team: infected.attacker_team,
+            });
+        }
         spawn_feature(def, pos, Some(color), &mut commands, &mut assets.draw());
     }
 }
@@ -475,6 +486,8 @@ mod tests {
                 NetId::default(),
             ))
             .id();
+        app.world_mut()
+            .init_resource::<crate::units::combat::VirusSpawnQueue>();
         app.world_mut().run_system_once(turn_into_features).unwrap();
         assert!(app.world().get_entity(built).is_err());
         assert!(app.world().get_entity(framed).is_ok());

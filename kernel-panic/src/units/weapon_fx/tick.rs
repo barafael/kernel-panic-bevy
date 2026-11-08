@@ -837,6 +837,7 @@ fn trigger_delayed_hit(
         impact_pos,
         attacker_distance: hit.attacker_distance,
         detonated: false,
+        scale: 1.0,
     });
     match hit.on_impact {
         Some(super::shared::ImpactEffect::DenialZone {

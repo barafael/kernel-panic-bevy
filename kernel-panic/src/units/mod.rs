@@ -115,6 +115,7 @@ impl Plugin for UnitsPlugin {
             .init_match_resource::<crate::game_setup::GameOverDismissed>()
             .add_message::<command_fire::CommandFireEvent>()
             .add_message::<deploy::DeployEvent>()
+            .add_message::<deploy::MorphDone>()
             .add_message::<network_buffer::EnterEvent>()
             .init_resource::<cloak::FogEnabled>()
             .init_resource::<animation::debris::ShatterCache>()
@@ -191,6 +192,14 @@ impl Plugin for UnitsPlugin {
                         // A Bombard that reaches its range deploys this
                         // same tick.
                         deploy::tick_bombard,
+                        // Nested to stay under the tuple-arity cap.
+                        (
+                            deploy::init_morph_gates,
+                            deploy::tick_morph_gates,
+                            deploy::start_morph,
+                            deploy::tick_morph,
+                        )
+                            .chain(),
                         deploy::process_deploy,
                         (
                             network_buffer::tick_port_buffers,
@@ -210,6 +219,7 @@ impl Plugin for UnitsPlugin {
                             construction::start_construction,
                             production::apply_bugger_off,
                             construction::tick_construction,
+                            construction::tick_repair,
                             construction::start_clearing,
                             construction::clear_features,
                             construction::decay_nanoframes,

@@ -17,7 +17,7 @@ use crate::rendering::interpolation::SimPose;
 use crate::units::combat::{AttackGroundOrder, AttackTargetOrder, Dying, Stunned};
 use crate::units::components::{Health, TeamId, UnitType};
 use crate::units::features::Feature;
-use crate::units::lifecycle::construction::{ClearOrder, Constructing, PendingBuild};
+use crate::units::lifecycle::construction::{ClearOrder, Constructing, PendingBuild, RepairOrder};
 use crate::units::lifecycle::production::Producer;
 use crate::units::lifecycle::spawning::Emerging;
 use crate::units::mechanics::cloak::Cloaked;
@@ -136,6 +136,7 @@ type UnitQ = (
         Option<&'static ClearOrder>,
         Option<&'static BombardOrder>,
         Option<&'static EnterOrder>,
+        Option<&'static RepairOrder>,
     ),
 );
 
@@ -279,7 +280,7 @@ pub fn capture(world: &mut World) -> Capture {
         (_, id, ut, team, pose),
         (health, dying, emerging, cloaked, stunned),
         (mt, fight, guard, attack, attack_ground, pending_build, constructing, queue, producer),
-        (clear, bombard, entering),
+        (clear, bombard, entering, repairing),
     ) in q.iter(world)
     {
         units += 1;
@@ -385,6 +386,10 @@ pub fn capture(world: &mut World) -> Capture {
             o.push(12);
             o.extend(reference(e.target));
         }
+        if let Some(r) = repairing {
+            o.push(13);
+            o.extend(reference(r.target));
+        }
     }
 
     // --- map features ----------------------------------------------------
@@ -457,11 +462,11 @@ pub fn describe(world: &mut World) -> Vec<String> {
                 (e, id, ut, team, pose),
                 (health, dying, emerging, _, stunned),
                 (mt, fight, guard, attack, attack_ground, pending_build, constructing, queue, producer),
-                (clear, bombard, entering),
+                (clear, bombard, entering, repairing),
             )| {
                 let tf = pose.sim();
                 format!(
-                    "#{:06} {:?} t{} pos {:?} rot {:?} hp {:?} dying {} emerging {:?} stunned {} | mt {:?} fight {} guard {} attack {} ag {:?} pb {:?} cons {:?} queue {:?} prod {:?} clear {:?} bombard {:?} enter {:?} | {e:?}",
+                    "#{:06} {:?} t{} pos {:?} rot {:?} hp {:?} dying {} emerging {:?} stunned {} | mt {:?} fight {} guard {} attack {} ag {:?} pb {:?} cons {:?} queue {:?} prod {:?} clear {:?} bombard {:?} enter {:?} repair {:?} | {e:?}",
                     id.0,
                     ut.0,
                     team.0,
@@ -483,6 +488,7 @@ pub fn describe(world: &mut World) -> Vec<String> {
                     clear,
                     bombard.map(|b| (b.target, b.pos, b.deploy_only)),
                     entering.map(|e| e.target),
+                    repairing.map(|r| r.target),
                 )
             },
         )

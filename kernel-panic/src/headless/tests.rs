@@ -1252,7 +1252,9 @@ fn bug_bombards_by_walking_in_and_deploying() {
             // the Byte at bombardment range, and a weapon only takes what
             // its team has in sight or on radar. An Assembler's radar
             // (480) covers the Byte from outside its own reach.
-            spawn_unit(UnitKind::Assembler, Faction::System, 0, p2, &mut ctx);
+            let spotter = spawn_unit(UnitKind::Assembler, Faction::System, 0, p2, &mut ctx);
+            // Out of the Byte's reach for the whole walk-in and shelling.
+            ctx.commands.entity(spotter).insert(Health::full(1.0e9));
             state.apply(world);
             (bug, byte)
         };
@@ -1317,7 +1319,8 @@ fn bug_bombards_by_walking_in_and_deploying() {
         // (With Alt the Exploit has no order, though its own targeting
         // may still engage a Byte standing in its 1200 reach.)
         if !deploy_only {
-            for _ in 0..10 * 30 {
+            // (The first shells fly a few seconds after the swap.)
+            for _ in 0..20 * 30 {
                 h.step();
             }
             let world = h.world_mut();
@@ -1651,6 +1654,7 @@ fn dual_core_places_its_bad_blocks() {
                 impact_pos: at + Vec3::new(0.0, 0.0, 50.0),
                 attacker_distance: 0.0,
                 detonated: false,
+                scale: 1.0,
             });
     }
     h.step();

@@ -268,7 +268,7 @@ fn chaos_command(d: &mut Dice, v: &View, team: u8, tick: u32, prev: bool) -> Sim
     match d.below(23) {
         0..=3 => SimCommand::Order {
             units,
-            order: match d.below(11) {
+            order: match d.below(12) {
                 0 => Order::Move(point(d)),
                 1 => Order::AttackMove(point(d)),
                 2 => Order::Patrol(point(d)),
@@ -292,7 +292,8 @@ fn chaos_command(d: &mut Dice, v: &View, team: u8, tick: u32, prev: bool) -> Sim
                     },
                     deploy_only: d.chance(30),
                 },
-                _ => Order::Enter(target(d)),
+                10 => Order::Enter(target(d)),
+                _ => Order::Repair(target(d)),
             },
             queue: d.chance(40),
         },

@@ -261,6 +261,9 @@ pub enum Order {
     /// A Packet walks to the teleporter and re-enters the buffer there
     /// (`network_enter.lua`'s `CMD_ENTER` on a unit).
     Enter(NetId),
+    /// A constructor walks into build range of a damaged friendly unit
+    /// and repairs it (`CMD_REPAIR`).
+    Repair(NetId),
 }
 
 /// What a [`Order::Bombard`] is aimed at (`CMDTYPE_ICON_UNIT_OR_MAP`).

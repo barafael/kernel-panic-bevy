@@ -72,14 +72,14 @@ use crate::interaction::movement::{CommandQueue, MoveTarget, Orders, QueuedComma
 use crate::interaction::selection::apply_ordered_command;
 use crate::interaction::selection::right_click::queue_command;
 use crate::sim::DetFloat;
-use crate::terrain::geovent::{GeoventSmoker, VentClaim};
+use crate::terrain::geovent::GeoventSmoker;
 use crate::terrain::heightmap::Heightmap;
 use crate::units::combat::{Dying, ForcedTarget, SelfDestructCountdown};
 use crate::units::components::{Health, TeamId, UnitType};
 use crate::units::content::definitions::UnitKind;
 use crate::units::content::unit_registry::UnitRegistry;
 use crate::units::lifecycle::construction::{
-    Constructing, PendingBuild, QueuedBuild, buildings_for, queue_build,
+    Constructing, PendingBuild, buildings_for, queue_build,
 };
 use crate::units::lifecycle::production::{FactoryOrders, Producer, factory_roster};
 use crate::units::mechanics::command_fire::CommandFireEvent;
@@ -329,7 +329,6 @@ pub(crate) struct ApplyCtx<'w, 's> {
     /// The orders factories give the units they build.
     factory_orders: Query<'w, 's, &'static mut FactoryOrders>,
     autohold: Query<'w, 's, &'static mut AutoHold>,
-    vents: Query<'w, 's, (Entity, &'static GeoventSmoker), Without<VentClaim>>,
     /// Last tick's spatial snapshot (area orders expand through it);
     /// bare test worlds have none.
     spatial: Option<Res<'w, crate::units::spatial::SpatialIndex>>,
@@ -1063,7 +1062,8 @@ impl ApplyCtx<'_, '_> {
                 | Order::ClearFeature(_)
                 | Order::ClearArea { .. }
                 | Order::Bombard { .. }
-                | Order::Enter(_) => None,
+                | Order::Enter(_)
+                | Order::Repair(_) => None,
             };
             if let Some(cmd) = factory_cmd {
                 for f in &factories {
@@ -1153,6 +1153,17 @@ impl ApplyCtx<'_, '_> {
                     pos,
                     deploy_only,
                 }
+            }
+            Order::Repair(t) => {
+                // A constructor repairs a friendly unit (`CMD_REPAIR`);
+                // whether it is damaged is for the builder to find out.
+                let Some((target, pos, t_team, _)) = self.live(t) else {
+                    return;
+                };
+                units.retain(|u| {
+                    u.kind.is_constructor() && u.e != target && self.friendly(u.team, t_team)
+                });
+                QueuedCommand::Repair { target, pos }
             }
             Order::Enter(t) => {
                 let Some((target, pos, t_team, t_kind)) = self.live(t) else {
@@ -1303,7 +1314,6 @@ impl ApplyCtx<'_, '_> {
         sites: &[Vec3],
         queue: BuildQueue,
     ) {
-        let mut ordered: Vec<Vec3> = Vec::new();
         for Own {
             e, kind: builder, ..
         } in self.owned(player, ids)
@@ -1323,15 +1333,11 @@ impl ApplyCtx<'_, '_> {
                     _ => queued.len(),
                 };
                 for &site in sites {
-                    let outcome =
-                        queue_build(&mut active, &mut queued, &mut slot, kind, site, |k| {
+                    queue_build(&mut active, &mut queued, &mut slot, kind, site, |k| {
                             self.registry
                                 .as_ref()
                                 .map_or(Vec2::splat(32.0), |r| r.footprint_elmos(k))
                         });
-                    if outcome == QueuedBuild::Queued {
-                        ordered.push(site);
-                    }
                 }
                 let mut ec = self.commands.entity(e);
                 if running.is_some() && active.is_none() {
@@ -1352,14 +1358,11 @@ impl ApplyCtx<'_, '_> {
                     .entity(e)
                     .insert(CommandQueue { commands: rest });
             }
-            ordered.extend_from_slice(sites);
         }
-        // Claim the vents so no second constructor can stack on them.
-        for (vent_entity, vent) in &self.vents {
-            if ordered.iter().any(|s| vent.pos.distance_squared(*s) < 1.0) {
-                self.commands.entity(vent_entity).insert(VentClaim);
-            }
-        }
+        // No claim on the vents: an order reserves nothing. Whoever starts
+        // a nanoframe first holds the vent, and the other order ends on
+        // arrival (`CBuilderCAI::GiveCommandReal` refuses only a site
+        // that is already blocked).
     }
 }
 

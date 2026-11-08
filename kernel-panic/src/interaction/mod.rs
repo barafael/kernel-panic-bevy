@@ -52,6 +52,8 @@ type ActiveOrder = (
         // A self-given engagement and a fight leg's detour end with it.
         crate::units::combat::engage::Engaged,
         crate::units::combat::engage::FightGoal,
+        crate::units::lifecycle::construction::RepairOrder,
+        crate::units::lifecycle::construction::Repairing,
         crate::units::mechanics::command_fire::InfectionCast,
     ),
 );
@@ -146,6 +148,9 @@ pub(crate) fn install_command(ec: &mut EntityCommands, cmd: movement::QueuedComm
                     pos,
                     deploy_only,
                 });
+        }
+        QueuedCommand::Repair { target, .. } => {
+            ec.insert(crate::units::lifecycle::construction::RepairOrder { target });
         }
         QueuedCommand::Enter { target, .. } => {
             ec.insert(crate::units::mechanics::network_buffer::EnterOrder { target });

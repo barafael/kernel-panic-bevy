@@ -62,6 +62,11 @@ pub struct PendingDamage {
     /// type — so even the `Melee` Wormsplash splashes. See
     /// [`Self::detonation`].
     pub detonated: bool,
+    /// Scales the weapon's damage: one sub-beam of a beam laser deals
+    /// `1 / salvoSize` of it, less with the distance it travelled
+    /// (`CBeamLaser::FireInternal`'s `salvoDamageMult · hitIntensity`).
+    /// 1 for everything else.
+    pub scale: f32,
 }
 
 impl PendingDamage {
@@ -77,6 +82,7 @@ impl PendingDamage {
             impact_pos,
             attacker_distance: 0.0,
             detonated: false,
+            scale: 1.0,
         }
     }
 
@@ -91,6 +97,7 @@ impl PendingDamage {
             impact_pos: pos,
             attacker_distance: 0.0,
             detonated: true,
+            scale: 1.0,
         }
     }
 }
@@ -841,7 +848,9 @@ impl DamagePass<'_, '_> {
         // `GetDynamicDamages` scales the projectile's whole damage array,
         // so the falloff reaches splash victims too.
         let dyn_mult = weapon_def.dyn_damage_multiplier(pending.attacker_distance);
-        let base = |kind: UnitKind| weapon_def.damage.for_type(kind.armor_class().key()) * dyn_mult;
+        let base = |kind: UnitKind| {
+            weapon_def.damage.for_type(kind.armor_class().key()) * dyn_mult * pending.scale
+        };
 
         // `CalcImpulseScale`: the knock-back uses the *default* damage,
         // scaled by the distance modifier and clamped. KP weapons set
@@ -889,7 +898,7 @@ impl DamagePass<'_, '_> {
             let damage = self
                 .target_unit_q
                 .get(target)
-                .map_or(weapon_def.damage.default * dyn_mult, |ut| base(ut.0));
+                .map_or(weapon_def.damage.default * dyn_mult * pending.scale, |ut| base(ut.0));
             let impulse = self
                 .target_pos_q
                 .get(target)
@@ -1331,6 +1340,7 @@ mod tests {
             impact_pos: at,
             attacker_distance: 0.0,
             detonated: false,
+            scale: 1.0,
         }
     }
 
@@ -1417,6 +1427,7 @@ mod tests {
                 impact_pos: Vec3::ZERO,
                 attacker_distance: 0.0,
                 detonated: false,
+                scale: 1.0,
             });
 
         app.world_mut().run_system_once(combat_system).unwrap();

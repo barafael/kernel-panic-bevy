@@ -388,6 +388,7 @@ pub fn death_system(
                     impact_pos: pos,
                     attacker_distance: 0.0,
                     detonated: false,
+                    scale: 1.0,
                 });
 
                 explosions.events.push(ExplosionEvent {

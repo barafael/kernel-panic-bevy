@@ -13,7 +13,7 @@ use crate::net::NetId;
 use crate::sim::DetFloat;
 use crate::units::combat::{Dying, Stunned};
 use crate::units::components::{Faction, Health, TeamId, UnitType};
-use crate::units::lifecycle::spawning::{SpawnContext, spawn_unit};
+use crate::units::lifecycle::spawning::SpawnContext;
 
 /// Event: the listed unit should deploy to its paired form. The
 /// deploy system resolves the target kind from the source. `then` is
@@ -22,6 +22,167 @@ use crate::units::lifecycle::spawning::{SpawnContext, spawn_unit};
 pub struct DeployEvent {
     pub entity: Entity,
     pub then: Option<QueuedCommand>,
+}
+
+/// The scripts' `Deploy()` / `Undeploy()` run 88 frames between the
+/// order and `lua_SwitchToExploit` / `lua_SwitchToBug`: the body flips
+/// (about 21 frames of moves) and the 67-step `sleep 30` alpha loop
+/// (bug.bos:20-47, exploit.bos:18-45).
+const MORPH_SECS: f32 = 88.0 / 30.0;
+
+/// bug.bos `Create`: a Bug that was not built (spawned, or unpacked
+/// from an Exploit) is `morphable` 2 s after it appears.
+const MORPHABLE_AFTER_SPAWN: f32 = 2.0;
+/// A Bug leaving its factory: `sleep 3000` once built, then `sleep 2000`.
+const MORPHABLE_AFTER_BUILD: f32 = 5.0;
+/// exploit.bos `FireWeapon1`: `idle` is back 5 s after each shot.
+const IDLE_AFTER_SHOT: f32 = 5.0;
+
+/// A deploy order: when the unit may morph (`morphable` for a Bug,
+/// `idle` for an Exploit) it does, and until then the order waits
+/// (`while(!morphable) sleep 500`).
+#[derive(Component, Clone, Copy, Debug)]
+pub struct MorphGate {
+    /// Seconds until the unit may morph.
+    pub remaining: f32,
+}
+
+/// A unit in the middle of its deploy or pack-up script: `Deploy()`
+/// first waits for its [`MorphGate`], then runs [`MORPH_SECS`] with the
+/// unit held in place and silent, and only then swaps the unit.
+#[derive(Component, Clone, Copy, Debug)]
+pub struct Morphing {
+    pub then: Option<QueuedCommand>,
+    /// The gate was open and the sequence is running.
+    pub started: bool,
+    pub remaining: f32,
+}
+
+/// `deployed=1`: the unit neither aims nor fires (a Bug from the start
+/// of the sequence, an Exploit from the order on).
+#[derive(Component, Clone, Copy, Debug)]
+pub struct MorphSilenced;
+
+/// The morph sequence is over: swap the unit for its pair.
+#[derive(Message, Debug, Clone, Copy)]
+pub struct MorphDone {
+    pub entity: Entity,
+    pub then: Option<QueuedCommand>,
+}
+
+/// Give every new Bug and Exploit its gate: a Bug waits out
+/// `morphable` (longer when it was just built), an Exploit starts
+/// `idle`.
+#[allow(clippy::type_complexity)]
+pub fn init_morph_gates(
+    new_units: Query<(Entity, &UnitType, Has<crate::units::spawning::Emerging>), Added<UnitType>>,
+    mut commands: Commands,
+) {
+    for (entity, unit, being_built) in &new_units {
+        let remaining = match unit.0 {
+            crate::units::content::definitions::UnitKind::Bug if being_built => {
+                MORPHABLE_AFTER_BUILD
+            }
+            crate::units::content::definitions::UnitKind::Bug => MORPHABLE_AFTER_SPAWN,
+            crate::units::content::definitions::UnitKind::Exploit => 0.0,
+            _ => continue,
+        };
+        commands.entity(entity).try_insert(MorphGate { remaining });
+    }
+}
+
+/// Run the gates down (an unfinished unit's script hasn't got to
+/// `morphable` yet), and push an Exploit's `idle` back 5 s on each shot.
+#[allow(clippy::type_complexity)]
+pub fn tick_morph_gates(
+    time: Res<Time>,
+    mut gates: Query<(&mut MorphGate, &UnitType, Has<crate::units::spawning::Emerging>)>,
+    fired: Query<
+        Entity,
+        (
+            Changed<crate::units::combat::AttackCooldown>,
+            Without<Stunned>,
+            With<MorphGate>,
+        ),
+    >,
+) {
+    let dt = time.delta_secs();
+    for (mut gate, _, being_built) in &mut gates {
+        if !being_built {
+            gate.remaining = (gate.remaining - dt).det_max(0.0);
+        }
+    }
+    for entity in &fired {
+        if let Ok((mut gate, unit, _)) = gates.get_mut(entity)
+            && unit.0 == crate::units::content::definitions::UnitKind::Exploit
+        {
+            gate.remaining = IDLE_AFTER_SHOT;
+        }
+    }
+}
+
+/// A deploy order starts the unit's script, unless it already runs
+/// (`if (deployed) return 0; //mutex`).
+pub fn start_morph(
+    mut events: MessageReader<DeployEvent>,
+    units: Query<&UnitType, (Without<Dying>, Without<Morphing>)>,
+    mut commands: Commands,
+) {
+    for event in events.read() {
+        let Ok(unit) = units.get(event.entity) else {
+            continue;
+        };
+        if unit.0.deploy_pair().is_none() {
+            continue;
+        }
+        let mut ec = commands.entity(event.entity);
+        ec.insert(Morphing {
+            then: event.then,
+            started: false,
+            remaining: MORPH_SECS,
+        });
+        // An Exploit sets `deployed=1` before it waits for `idle`.
+        if unit.0 == crate::units::content::definitions::UnitKind::Exploit {
+            ec.insert(MorphSilenced);
+        }
+    }
+}
+
+/// Advance the scripts: wait for the gate, then hold the unit still and
+/// silent for [`MORPH_SECS`] and hand it over to [`process_deploy`].
+#[allow(clippy::type_complexity)]
+pub fn tick_morph(
+    time: Res<Time>,
+    mut units: Query<(Entity, &mut Morphing, Option<&MorphGate>), Without<Dying>>,
+    mut done: MessageWriter<MorphDone>,
+    mut commands: Commands,
+) {
+    let dt = time.delta_secs();
+    for (entity, mut morph, gate) in &mut units {
+        if !morph.started {
+            if gate.is_some_and(|g| g.remaining > 0.0) {
+                continue;
+            }
+            morph.started = true;
+            // `deployed=1`, `set MAX_SPEED to 1`.
+            commands.entity(entity).try_insert(MorphSilenced);
+        }
+        // Pinned: whatever the player orders meanwhile does not move it.
+        commands.entity(entity).remove::<(
+            MoveTarget,
+            MovePath,
+            crate::units::combat::AttackTargetOrder,
+            crate::units::combat::AimTarget,
+        )>();
+        morph.remaining -= dt;
+        if morph.remaining <= 0.0 {
+            done.write(MorphDone {
+                entity,
+                then: morph.then,
+            });
+            commands.entity(entity).remove::<Morphing>();
+        }
+    }
 }
 
 /// `bug_bombard.lua`: the Bug deploys once within this of its target
@@ -102,13 +263,14 @@ pub fn tick_bombard(
     }
 }
 
-/// Process deploy events by despawning the source and spawning
-/// its pair with proportional HP at the same position. The pair starts
-/// with the event's `then` order, if any, and keeps the player's
-/// selection (`kp_keep_morphed_selected.lua`).
+/// Finish a morph by despawning the source and spawning its pair with
+/// proportional HP at the same position, facing the same way and with
+/// the same queued orders (`LuaCOB.lua:34-54`). The pair starts with the
+/// event's `then` order, if any, and keeps the player's selection
+/// (`kp_keep_morphed_selected.lua`).
 #[allow(clippy::type_complexity)]
 pub fn process_deploy(
-    mut events: MessageReader<DeployEvent>,
+    mut events: MessageReader<MorphDone>,
     // `Without<Dying>`: a unit in its death animation must not be
     // swapped for a fresh pair (the corpse would be resurrected as a
     // 1 % pair while the death pipeline still owns it).
@@ -121,6 +283,7 @@ pub fn process_deploy(
             &Health,
             Has<Selected>,
             Option<&crate::units::combat::Infected>,
+            Option<&crate::interaction::movement::CommandQueue>,
         ),
         Without<Dying>,
     >,
@@ -128,7 +291,8 @@ pub fn process_deploy(
     mut ctx: SpawnContext,
 ) {
     for event in events.read() {
-        let Ok((unit, faction, team, transform, health, selected, infected)) = query.get(event.entity)
+        let Ok((unit, faction, team, transform, health, selected, infected, queue)) =
+            query.get(event.entity)
         else {
             continue;
         };
@@ -158,11 +322,13 @@ pub fn process_deploy(
             });
         }
 
-        let spawned = spawn_unit(
+        let facing = transform.forward().xz();
+        let spawned = crate::units::lifecycle::spawning::spawn_unit_facing(
             target_kind,
             *faction,
             team.0,
             transform.translation,
+            crate::sim::Heading::from_vector(facing.x, facing.y),
             &mut ctx,
         );
         let mut ec = ctx.commands.entity(spawned);
@@ -172,6 +338,11 @@ pub fn process_deploy(
         });
         if selected {
             ec.insert(Selected);
+        }
+        if let Some(queue) = queue {
+            ec.insert(crate::interaction::movement::CommandQueue {
+                commands: queue.commands.clone(),
+            });
         }
         if let Some(then) = event.then {
             crate::interaction::install_command(&mut ec, then);
@@ -250,5 +421,88 @@ mod tests {
                 .is_none(),
             "no deploy for a dead target"
         );
+    }
+
+    /// The deploy script waits for `morphable`, then holds the unit still
+    /// and silent for 88 frames, and only then hands it over to the swap.
+    #[test]
+    fn a_morph_waits_for_its_gate_then_runs_its_sequence() {
+        use crate::units::content::definitions::UnitKind;
+        let mut world = World::new();
+        world.init_resource::<Messages<DeployEvent>>();
+        world.init_resource::<Messages<MorphDone>>();
+        world.init_resource::<Time>();
+        let bug = world
+            .spawn((
+                UnitType(UnitKind::Bug),
+                MorphGate { remaining: 1.0 },
+                MoveTarget(Vec3::X * 100.0),
+            ))
+            .id();
+        world
+            .resource_mut::<Messages<DeployEvent>>()
+            .write(DeployEvent {
+                entity: bug,
+                then: None,
+            });
+        world.run_system_once(start_morph).unwrap();
+        assert!(world.get::<Morphing>(bug).is_some());
+        assert!(world.get::<MorphSilenced>(bug).is_none(), "a Bug still fires while it waits");
+        let step = |world: &mut World, secs: f32| {
+            world
+                .resource_mut::<Time>()
+                .advance_by(std::time::Duration::from_secs_f32(secs));
+            world.run_system_once(tick_morph).unwrap();
+        };
+        // The gate is shut: nothing starts.
+        step(&mut world, 0.5);
+        assert!(!world.get::<Morphing>(bug).unwrap().started);
+        // Open: the sequence starts, the Bug is pinned and silent.
+        world.get_mut::<MorphGate>(bug).unwrap().remaining = 0.0;
+        step(&mut world, 0.1);
+        assert!(world.get::<Morphing>(bug).unwrap().started);
+        assert!(world.get::<MorphSilenced>(bug).is_some());
+        assert!(world.get::<MoveTarget>(bug).is_none());
+        assert_eq!(world.resource::<Messages<MorphDone>>().len(), 0);
+        // 88 frames later the swap is due.
+        step(&mut world, MORPH_SECS);
+        assert_eq!(world.resource::<Messages<MorphDone>>().len(), 1);
+        assert!(world.get::<Morphing>(bug).is_none());
+    }
+
+    /// `morphable` is later for a Bug straight out of its factory, and an
+    /// Exploit's `idle` returns 5 s after each shot.
+    #[test]
+    fn gates_follow_the_scripts() {
+        use crate::units::content::definitions::UnitKind;
+        let mut world = World::new();
+        world.init_resource::<Time>();
+        let built = world
+            .spawn((
+                UnitType(UnitKind::Bug),
+                crate::units::spawning::Emerging {
+                    target_y: 0.0,
+                    remaining: 1.0,
+                    total: 1.0,
+                    rally_point: None,
+                    rally_then: None,
+                    style: crate::units::spawning::EmergeStyle::Fade,
+                },
+            ))
+            .id();
+        let loose = world.spawn(UnitType(UnitKind::Bug)).id();
+        let exploit = world.spawn(UnitType(UnitKind::Exploit)).id();
+        world.run_system_once(init_morph_gates).unwrap();
+        let gate = |world: &World, e| world.get::<MorphGate>(e).unwrap().remaining;
+        assert_eq!(gate(&world, built), 5.0);
+        assert_eq!(gate(&world, loose), 2.0);
+        assert_eq!(gate(&world, exploit), 0.0);
+        // The built one's clock starts when it is finished.
+        world
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_secs(1));
+        world.run_system_once(tick_morph_gates).unwrap();
+        assert_eq!(gate(&world, built), 5.0);
+        assert_eq!(gate(&world, loose), 1.0);
     }
 }
