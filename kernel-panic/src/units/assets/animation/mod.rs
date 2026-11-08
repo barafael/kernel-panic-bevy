@@ -743,6 +743,8 @@ pub struct AnimFxOut<'w, 's> {
     /// A builder clearing a feature off its site: the strand ends on the
     /// feature (`network_arceffect.lua` draws it for that order too).
     pub clearing: Query<'w, 's, &'static crate::units::lifecycle::construction::ClearingFeature>,
+    /// A builder mending a unit: the strand ends on it.
+    pub repairing: Query<'w, 's, &'static crate::units::lifecycle::construction::Repairing>,
     pub explosions: ResMut<'w, PendingExplosions>,
     /// Exploded pieces for [`debris::spawn_debris`] to throw.
     pub debris: ResMut<'w, debris::PendingDebris>,
@@ -1046,6 +1048,7 @@ fn apply_and_drain(
                     .and_then(|b| fx.buildees.get(b).ok())
                     .map(|(gtf, _)| gtf.translation())
                     .or_else(|| fx.clearing.get(entity).ok().map(|c| c.at))
+                    .or_else(|| fx.repairing.get(entity).ok().map(|r| r.at))
                 else {
                     continue;
                 };

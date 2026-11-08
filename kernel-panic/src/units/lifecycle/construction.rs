@@ -139,6 +139,112 @@ pub struct ClearingFeature {
     pub at: Vec3,
 }
 
+/// A constructor's running repair order (`CBuilderCAI::ExecuteRepair`,
+/// `CMD_REPAIR`): [`tick_repair`] walks it into build range of the
+/// friendly `target`, mends it at the builder's build power until it is
+/// whole, and ends the order. Builders repair by default
+/// (`canRepair = builder && repairSpeed > 0`, repair speed = WorkerTime).
+#[derive(Component, Clone, Copy, Debug, PartialEq)]
+#[component(storage = "SparseSet")]
+pub struct RepairOrder {
+    pub target: Entity,
+}
+
+/// A builder in range, mending `target` where it stands at `at` (what
+/// its emitter aims at). Set and cleared by [`tick_repair`].
+#[derive(Component, Clone, Copy, Debug)]
+#[component(storage = "SparseSet")]
+pub struct Repairing {
+    pub target: Entity,
+    pub at: Vec3,
+}
+
+/// Walk every repairing builder into range of its target and mend it:
+/// `maxHealth · WorkerTime / BuildTime` hit points a second per builder
+/// (an Assembler restores a Socket at about 667 HP/s). The order ends
+/// when the target is whole, dead, gone or no longer a friend. Builders
+/// go in id order; a stunned one does nothing, and one whose build
+/// stance is not up yet waits for it.
+#[allow(clippy::type_complexity)]
+pub fn tick_repair(
+    time: Res<Time>,
+    builders: Query<
+        (
+            Entity,
+            &Transform,
+            &UnitType,
+            &TeamId,
+            &RepairOrder,
+            Option<&Repairing>,
+            Option<&MoveTarget>,
+            Option<&crate::units::assets::animation::UnitAnimator>,
+            &NetId,
+        ),
+        (Without<Dying>, Without<Stunned>),
+    >,
+    mut targets: Query<
+        (&Transform, &UnitType, &TeamId, &mut crate::units::components::Health),
+        (Without<Dying>, Without<Emerging>),
+    >,
+    alliances: Res<crate::units::teams::Alliances>,
+    registry: Res<UnitRegistry>,
+    mut commands: Commands,
+) {
+    let dt = time.delta_secs();
+    for (builder, tf, kind, team, order, repairing, move_target, animator, _) in
+        builders.iter().sort::<&NetId>()
+    {
+        let done = |commands: &mut Commands| {
+            commands
+                .entity(builder)
+                .remove::<(RepairOrder, Repairing, MoveTarget, MovePath)>();
+        };
+        let Ok((target_tf, target_kind, target_team, mut health)) = targets.get_mut(order.target)
+        else {
+            done(&mut commands);
+            continue;
+        };
+        if health.current <= 0.0
+            || health.current >= health.max
+            || !alliances.friendly(team.0, target_team.0)
+        {
+            done(&mut commands);
+            continue;
+        }
+        let at = target_tf.translation;
+        let range = registry.build_range(kind.0, target_kind.0);
+        if flat_dist_sq(tf.translation, at) > range * range {
+            if repairing.is_some() {
+                commands.entity(builder).remove::<Repairing>();
+            }
+            let stale = move_target
+                .is_none_or(|t| t.0.distance(at) > crate::units::combat::CHASE_REPATH_DISTANCE);
+            if stale {
+                commands.entity(builder).insert(MoveTarget(at));
+            }
+            continue;
+        }
+        let mut ec = commands.entity(builder);
+        if move_target.is_some() {
+            ec.remove::<(MoveTarget, MovePath)>();
+        }
+        if repairing.is_none_or(|r| r.target != order.target) {
+            ec.insert(Repairing {
+                target: order.target,
+                at,
+            });
+        }
+        if animator.and_then(|a| a.driver.in_build_stance()) == Some(false) {
+            continue;
+        }
+        let build_time = registry.raw_build_time(target_kind.0);
+        if build_time > 0.0 {
+            let heal = health.max * registry.worker_time(kind.0) / build_time * dt;
+            health.current = (health.current + heal).det_min(health.max);
+        }
+    }
+}
+
 /// A constructor's running clear order (`CBuilderCAI::ExecuteReclaim`
 /// on a feature or an area): [`start_clearing`] walks it into build
 /// range, hands the feature to [`ClearingFeature`] / [`clear_features`]
@@ -871,6 +977,68 @@ fn forward_toward_site(builder_pos: Vec3, site: Vec3) -> Option<Vec3> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A builder in range mends a friend at `maxHealth · WorkerTime /
+    /// BuildTime` a second, walks to one out of range, and ends the order
+    /// when the friend is whole or an enemy.
+    #[test]
+    fn a_builder_repairs_a_damaged_friend() {
+        use bevy::ecs::system::RunSystemOnce;
+        let registry = UnitRegistry::load();
+        let max = registry.max_health(UnitKind::Socket);
+        let rate = max * registry.worker_time(UnitKind::Assembler)
+            / registry.raw_build_time(UnitKind::Socket);
+        let mut world = World::new();
+        world.init_resource::<Time>();
+        world
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_secs(1));
+        world.insert_resource(crate::units::teams::Alliances::from_seats([(0, 0), (1, 1)]));
+        world.insert_resource(registry);
+        let socket = world
+            .spawn((
+                UnitType(UnitKind::Socket),
+                TeamId(0),
+                Transform::from_xyz(100.0, 0.0, 0.0),
+                crate::units::components::Health {
+                    current: 1000.0,
+                    max,
+                },
+            ))
+            .id();
+        let builder = world
+            .spawn((
+                UnitType(UnitKind::Assembler),
+                TeamId(0),
+                Transform::default(),
+                RepairOrder { target: socket },
+            ))
+            .id();
+        let hp = |world: &World| {
+            world
+                .get::<crate::units::components::Health>(socket)
+                .unwrap()
+                .current
+        };
+        world.run_system_once(tick_repair).unwrap();
+        assert!((hp(&world) - (1000.0 + rate)).abs() < 1.0, "{} vs {rate}", hp(&world));
+        assert!(world.get::<Repairing>(builder).is_some());
+
+        // Out of range: it walks.
+        world.get_mut::<Transform>(builder).unwrap().translation.x = -5000.0;
+        world.run_system_once(tick_repair).unwrap();
+        assert!(world.get::<MoveTarget>(builder).is_some());
+        assert!(world.get::<Repairing>(builder).is_none());
+
+        // Whole: the order ends.
+        world
+            .get_mut::<crate::units::components::Health>(socket)
+            .unwrap()
+            .current = max;
+        world.run_system_once(tick_repair).unwrap();
+        assert!(world.get::<RepairOrder>(builder).is_none());
+        assert!(world.get::<MoveTarget>(builder).is_none());
+    }
 
     /// The returned vector has unit length and lies in the XZ plane — so
     /// `Transform::looking_to(forward, Vec3::Y)` produces a pure yaw

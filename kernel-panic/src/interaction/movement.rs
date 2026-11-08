@@ -192,6 +192,12 @@ pub enum QueuedCommand {
         pos: Vec3,
         deploy_only: bool,
     },
+    /// A constructor walks into build range of the friendly `target` and
+    /// repairs it until it is whole (`CMD_REPAIR`). `pos` for drawing.
+    Repair {
+        target: Entity,
+        pos: Vec3,
+    },
     /// A Packet walks to the teleporter `target` and re-enters the
     /// buffer there (`network_enter.lua`). `pos` for drawing.
     Enter {
@@ -208,6 +214,7 @@ impl QueuedCommand {
             | QueuedCommand::Guard { pos, .. }
             | QueuedCommand::ClearFeature { pos, .. }
             | QueuedCommand::Bombard { pos, .. }
+            | QueuedCommand::Repair { pos, .. }
             | QueuedCommand::Enter { pos, .. } => *pos,
             QueuedCommand::AttackGround(pos) => *pos,
             QueuedCommand::BuildAt { site, .. } => *site,
@@ -536,6 +543,7 @@ pub struct OrderState {
     pending_cast: Has<crate::units::mechanics::command_fire::PendingCommandFire>,
     nx_cast: Has<crate::units::mechanics::command_fire::NxCast>,
     clearing: Has<crate::units::lifecycle::construction::ClearOrder>,
+    repairing: Has<crate::units::lifecycle::construction::RepairOrder>,
     bombard: Has<crate::units::mechanics::deploy::BombardOrder>,
     entering: Has<crate::units::mechanics::network_buffer::EnterOrder>,
     dispatching: Has<crate::units::mechanics::network_buffer::DispatchOrder>,
@@ -563,6 +571,7 @@ impl OrderStateItem<'_, '_> {
             || self.pending_cast
             || self.nx_cast
             || self.clearing
+            || self.repairing
             || self.bombard
             || self.entering
     }
@@ -577,7 +586,7 @@ impl OrderStateItem<'_, '_> {
     /// walk ends it, as `CBuilderCAI::ReclaimObject` finishes on
     /// `progressState == Failed`.
     pub fn walking_to_reach(&self) -> bool {
-        self.clearing || self.bombard || self.entering
+        self.clearing || self.repairing || self.bombard || self.entering
     }
 }
 
@@ -633,6 +642,7 @@ pub(crate) fn promote_next_command(
         | QueuedCommand::ClearFeature { .. }
         | QueuedCommand::ClearArea { .. }
         | QueuedCommand::Bombard { .. }
+        | QueuedCommand::Repair { .. }
         | QueuedCommand::Enter { .. } => None,
         c => Some(c.position()),
     }
@@ -667,6 +677,8 @@ pub(crate) fn end_move_leg(
             ec.remove::<(
                 crate::units::lifecycle::construction::ClearOrder,
                 crate::units::lifecycle::construction::ClearingFeature,
+                crate::units::lifecycle::construction::RepairOrder,
+                crate::units::lifecycle::construction::Repairing,
                 crate::units::mechanics::deploy::BombardOrder,
                 crate::units::mechanics::network_buffer::EnterOrder,
             )>();
@@ -1140,6 +1152,7 @@ pub fn draw_selected_command_lines(
             let to = sample_at_ground(pos.x, pos.z, hm);
             let color = match cmd {
                 QueuedCommand::Move(_) | QueuedCommand::Enter { .. } => MOVE_COLOR,
+                QueuedCommand::Repair { .. } => BUILD_COLOR,
                 QueuedCommand::BuildAt { .. } => BUILD_COLOR,
                 QueuedCommand::Patrol(_) => PATROL_COLOR,
                 QueuedCommand::AttackMove(_) => FIGHT_COLOR,
@@ -1371,6 +1384,7 @@ pub fn draw_selected_factory_orders(
                 QueuedCommand::Guard { .. } => GUARD_COLOR,
                 QueuedCommand::Move(_)
                 | QueuedCommand::BuildAt { .. }
+                | QueuedCommand::Repair { .. }
                 | QueuedCommand::Enter { .. } => MOVE_COLOR,
                 QueuedCommand::ClearFeature { .. } | QueuedCommand::ClearArea { .. } => CLEAR_COLOR,
                 QueuedCommand::Bombard { .. } => BOMBARD_COLOR,

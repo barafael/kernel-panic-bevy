@@ -784,7 +784,10 @@ mod tests {
         click(&mut world);
         let queue = &world.get::<CommandQueue>(builder).unwrap().commands;
         assert!(matches!(queue[..], [QueuedCommand::BuildAt { site, .. }] if site == fresh));
-        assert!(world.get::<VentClaim>(fresh_vent).is_some());
+        assert!(
+            world.get::<VentClaim>(fresh_vent).is_none(),
+            "an order reserves nothing"
+        );
 
         // On the running order's site: it stops, the queue stays.
         set_site(&mut world, Vec3::X, true);
@@ -930,7 +933,10 @@ mod tests {
         let pending = world.get::<PendingBuild>(builder).expect("BuildAt issued");
         assert_eq!(pending.kind, UnitKind::Socket);
         assert_eq!(pending.site, site);
-        assert!(world.get::<VentClaim>(vent).is_some());
+        assert!(
+            world.get::<VentClaim>(vent).is_none(),
+            "an order reserves nothing"
+        );
         assert_eq!(world.resource::<PlacementMode>().kind, None);
         assert!(world.get::<Selected>(builder).is_some());
     }

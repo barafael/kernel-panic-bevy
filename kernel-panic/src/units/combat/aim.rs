@@ -275,6 +275,27 @@ pub fn weapon_range_2d(
     }
 }
 
+/// Where a weapon's range is measured to: a `Melee` weapon (the Worm's
+/// bite) has `targetBorder = 1`, so the distance runs to the target's
+/// collision surface (`target` pulled back by `hit_radius` toward
+/// `aim_from`); every other weapon measures to the aim point.
+pub fn surface_reach(
+    weapon: &spring_tdf::WeaponDef,
+    aim_from: Vec3,
+    target: Vec3,
+    hit_radius: f32,
+) -> Vec3 {
+    if weapon.category() != spring_tdf::WeaponCategory::Melee {
+        return target;
+    }
+    let offset = target - aim_from;
+    let length = offset.length();
+    if length <= hit_radius {
+        return aim_from;
+    }
+    aim_from + offset * ((length - hit_radius) / length)
+}
+
 /// `CWeapon::TestRange`: whether `target` is in reach of `weapon` aimed
 /// from `aim_from` — the 2D distance against [`weapon_range_2d`] for the
 /// height difference. The one range test every fire / chase decision

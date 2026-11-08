@@ -251,6 +251,10 @@ pub struct AiScratch {
     enemy_structs: Vec<EnemyStructure>,
     /// Free-vent positions scratch for `run_constructors`.
     vent_pos: Vec<Vec3>,
+    /// The sites the units' build orders are walking to: `(team, site)`.
+    /// A vent a team's own constructor is already heading for is not
+    /// sent a second one (KPAI keeps its own claim on a spot).
+    pending_sites: Vec<(u8, Vec3)>,
     /// The match's alliances, copied at the top of the tick: friend or
     /// foe for every decision (upstream `td.allyTeam`,
     /// `AreTeamsAllied`).
@@ -277,6 +281,7 @@ type UnitQueryData = (
     (Has<NxCast>, Has<PendingCommandFire>),
     // The unit id: names it in the AI's commands, orders the snapshot.
     &'static NetId,
+    Option<&'static crate::units::lifecycle::construction::PendingBuild>,
 );
 
 /// Every AI order goes through the command bus as its team's player
@@ -476,6 +481,7 @@ fn snapshot(
     s.force.clear();
     s.ai_teams.clear();
     s.structures.clear();
+    s.pending_sites.clear();
     s.homes.clear();
     let mut fallback_homes: Vec<(u8, Vec3)> = Vec::new();
     // Canonical order (`NetId`, Spring's unit ids): the dice the AI
@@ -498,6 +504,7 @@ fn snapshot(
         protected,
         (nx_cast, pending_cast),
         net,
+        pending_build,
     ) in sorted
     {
         let kind = ut.0;
@@ -515,6 +522,9 @@ fn snapshot(
             protected,
         };
         s.units.push(snap);
+        if let Some(pending) = pending_build {
+            s.pending_sites.push((team.0, pending.site));
+        }
         // Units still emerging count too, so the budget already sees
         // what is being built and several factories can't overshoot.
         s.counts.entry(team.0).or_default().add(kind);
@@ -694,6 +704,26 @@ fn run_constructors(
         .iter()
         .filter(|u| u.team == team && expansion::is_special(u.kind))
         .count();
+    // Vents this team's own builders are already walking to are not up for
+    // a second constructor; they come back at the end.
+    let claim_sq = DATAVENT_CLAIM_RADIUS * DATAVENT_CLAIM_RADIUS;
+    let mut held: Vec<(Entity, Vec3)> = Vec::new();
+    {
+        let own: Vec<Vec3> = s
+            .pending_sites
+            .iter()
+            .filter(|(t, _)| *t == team)
+            .map(|(_, p)| *p)
+            .collect();
+        let mut i = 0;
+        while i < s.vents.len() {
+            if own.iter().any(|p| flat_dist_sq(*p, s.vents[i].1) <= claim_sq) {
+                held.push(s.vents.remove(i));
+            } else {
+                i += 1;
+            }
+        }
+    }
     s.vent_pos.clear();
     s.vent_pos.extend(s.vents.iter().map(|(_, p)| *p));
     for ctor in s
@@ -772,6 +802,9 @@ fn run_constructors(
             owned_specials += 1;
         }
     }
+    s.vents.extend(held);
+    s.vents
+        .sort_by(|a, b| (a.1.x, a.1.z).partial_cmp(&(b.1.x, b.1.z)).unwrap());
 }
 
 /// Nearest living enemy of `team` (not allied) within `radius` of

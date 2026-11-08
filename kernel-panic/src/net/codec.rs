@@ -368,6 +368,7 @@ mod tests {
             [0, 1, 9]
         );
         assert_eq!(encode(Order::Enter(NetId(1)))[..3], [0, 1, 10]);
+        assert_eq!(encode(Order::Repair(NetId(1)))[..3], [0, 1, 11]);
         assert_eq!(NetLen::quantize(400.0).to_f32(), 400.0);
         assert_eq!(NetLen::quantize(-3.0), NetLen(0));
     }

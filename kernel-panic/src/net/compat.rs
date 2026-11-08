@@ -118,12 +118,21 @@ use super::state::Fnv;
 /// 0.065, turn radius 1000) and drops within 12 frames of the target; the
 /// Obelisk's Infection is a high-arc shell with a 200/1500 impact blast
 /// that starts the gas where it lands.
+/// 23 (2026-11-09, parity review, third pass): constructors repair
+/// (`Order::Repair`, `maxHealth · WorkerTime / BuildTime` a second); a
+/// Bug or Exploit morphs only when `morphable` / `idle`, then spends 88
+/// silent frames pinned before the swap, which keeps heading and queue; a
+/// finished infected frame releases its Virus; a melee weapon's range
+/// runs to the target's surface; a DOS/Gauss beam is `beamtime · 30`
+/// one-frame sub-beams with a 50 % falloff at range, and a salvo waits for
+/// its last sub-beam; an east/west-facing building rotates its yardmap; a
+/// build order reserves no datavent (only a nanoframe or building does).
 ///
 /// [`SimCommand::Dropped`]: crate::net::SimCommand::Dropped
 /// [`SimCommand::Returned`]: crate::net::SimCommand::Returned
 /// [`SimCommand::InternalSpeed`]: crate::net::SimCommand::InternalSpeed
 /// [`MatchRules`]: crate::net::MatchRules
-pub const SIM_VERSION: u32 = 22;
+pub const SIM_VERSION: u32 = 23;
 
 /// The map-independent half of [`Compat`]: what a peer announces when
 /// it joins a room, before any map is chosen.

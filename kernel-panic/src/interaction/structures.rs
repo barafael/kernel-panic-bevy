@@ -218,9 +218,9 @@ impl StructureLayer {
     /// The stamp a structure of `kind` at `pos` would leave. Units are
     /// never crushable (`crushable` defaults off): a Bad Block is only
     /// once it has turned into its feature.
-    fn stamp_of(&self, registry: &UnitRegistry, kind: UnitKind, pos: Vec3) -> Stamp {
+    fn stamp_of(&self, registry: &UnitRegistry, kind: UnitKind, pos: Vec3, facing: u32) -> Stamp {
         Stamp {
-            squares: self.squares_of(registry, kind, pos),
+            squares: self.squares_of(registry, kind, pos, facing),
             crushable: false,
         }
     }
@@ -286,7 +286,13 @@ impl StructureLayer {
     /// plus the terrain-style codes `e`/`i`/`s`/`b`/`u` that ship open in
     /// KP's yardmaps. A missing yardmap blocks everything (the `unwrap_or('o')`
     /// below matches `CGuiHandler`'s default-blocked reading).
-    fn squares_of(&self, registry: &UnitRegistry, kind: UnitKind, pos: Vec3) -> Vec<(u32, u32)> {
+    fn squares_of(
+        &self,
+        registry: &UnitRegistry,
+        kind: UnitKind,
+        pos: Vec3,
+        facing: u32,
+    ) -> Vec<(u32, u32)> {
         let Some(def) = registry.def(kind) else {
             return Vec::new();
         };
@@ -294,7 +300,15 @@ impl StructureLayer {
             def.footprint_x.det_max(1.0) as i32,
             def.footprint_z.det_max(1.0) as i32,
         );
-        let (xsize, zsize) = (fx * 2, fz * 2);
+        // The footprint in squares, and the object's own size: swapped
+        // when it faces east or west (`CSolidObject::GetFootprint`).
+        let (fp_x, fp_z) = (fx * 2, fz * 2);
+        let facing = (facing % 4) as usize;
+        let (xsize, zsize) = if facing.is_multiple_of(2) {
+            (fp_x, fp_z)
+        } else {
+            (fp_z, fp_x)
+        };
         let x0 = ((pos.x - xsize as f32 * SQUARE_SIZE * 0.5) / SQUARE_SIZE).round() as i32;
         let z0 = ((pos.z - zsize as f32 * SQUARE_SIZE * 0.5) / SQUARE_SIZE).round() as i32;
         let chars: Vec<char> = def
@@ -303,11 +317,25 @@ impl StructureLayer {
             .filter(|c| !c.is_whitespace())
             .map(|c| c.to_ascii_lowercase())
             .collect();
+        // `GetGroundBlockingMaskAtPos`: a map square's place in the yardmap
+        // is its offset from the centre, rotated by the build facing.
+        const ROTATION_DIRS: [(i32, i32); 5] = [(0, 1), (1, 0), (0, -1), (-1, 0), (0, 1)];
+        const ROTATION_CORRECTIONS: [(i32, i32); 4] = [(0, 0), (-1, 0), (-1, -1), (0, -1)];
+        let (front, right) = (ROTATION_DIRS[facing], ROTATION_DIRS[facing + 1]);
+        let adjust = ROTATION_CORRECTIONS[facing];
+        let (half_size, half_foot) = ((xsize >> 1, zsize >> 1), (fp_x >> 1, fp_z >> 1));
         (0..zsize)
             .flat_map(|sz| (0..xsize).map(move |sx| (sx, sz)))
             .filter(|&(sx, sz)| {
+                let diff = (sx - half_size.0, sz - half_size.1);
+                let by = front.0 * diff.0 + front.1 * diff.1 + half_foot.1 + adjust.1;
+                let bx = right.0 * diff.0 + right.1 * diff.1 + half_foot.0 + adjust.0;
+                if bx < 0 || by < 0 || bx >= fp_x || by >= fp_z {
+                    // Outside the yardmap: open.
+                    return false;
+                }
                 let c = chars
-                    .get(((sx / 2) + (sz / 2) * fx) as usize)
+                    .get(((bx / 2) + (by / 2) * fx) as usize)
                     .copied()
                     .unwrap_or('o');
                 !matches!(c, 'y' | 'c' | 'e' | 'i' | 's' | 'b' | 'u')
@@ -316,6 +344,13 @@ impl StructureLayer {
             .map(|(sx, sz)| ((x0 + sx) as u32, (z0 + sz) as u32))
             .collect()
     }
+}
+
+/// A building's build facing from the way its model faces: 0 south (+Z),
+/// 1 east, 2 north, 3 west (`GetFacingFromHeading`).
+fn facing_of(rotation: Quat) -> u32 {
+    let front = rotation * Vec3::NEG_Z;
+    crate::sim::Heading::from_vector(front.x, front.z).facing()
 }
 
 /// Mover classes of the roster: `(xsizeh, crushes features)`.
@@ -363,7 +398,10 @@ impl StructureStamped {
         let stamp = if let Some(feature) = world.get::<Feature>(entity) {
             nav.structures.feature_stamp(feature.def, pos)
         } else if let Some(kind) = world.get::<UnitType>(entity) {
-            nav.structures.stamp_of(registry, kind.0, pos)
+            let facing = world
+                .get::<Transform>(entity)
+                .map_or(0, |tf| facing_of(tf.rotation));
+            nav.structures.stamp_of(registry, kind.0, pos, facing)
         } else {
             return;
         };
@@ -451,7 +489,7 @@ pub fn update_structure_layer(
         if stamped {
             // A layer rebuilt under a live, already-tagged structure:
             // its hook ran against the old layer, so stamp it here.
-            let stamp = layer.stamp_of(&registry, kind.0, tf.translation);
+            let stamp = layer.stamp_of(&registry, kind.0, tf.translation, facing_of(tf.rotation));
             changed = union(changed, layer.block(entity, stamp));
         } else {
             commands.entity(entity).try_insert(StructureStamped);
@@ -480,7 +518,7 @@ pub fn update_structure_layer(
     let mut moved: Vec<_> = moved.iter().collect();
     moved.sort_unstable_by_key(|(_, id, ..)| **id);
     for (entity, _, kind, tf) in moved {
-        let stamp = layer.stamp_of(&registry, kind.0, tf.translation);
+        let stamp = layer.stamp_of(&registry, kind.0, tf.translation, facing_of(tf.rotation));
         if layer
             .stamps
             .get(&entity)
@@ -512,6 +550,44 @@ mod tests {
     use super::*;
     use crate::interaction::movement::{MovePath, MoveTarget};
     use crate::interaction::movement_harness::Harness;
+
+    /// The yardmap turns with the build facing: an east-facing Window
+    /// blocks the same number of squares as a south-facing one, in the
+    /// yardmap's rotated places, and a north-facing one is the south one
+    /// turned half way round.
+    #[test]
+    fn the_yardmap_rotates_with_the_build_facing() {
+        let mut h = Harness::flat();
+        h.spawn_structure(UnitKind::Terminal, 1, Vec3::new(2000.0, 0.0, 2000.0));
+        h.step();
+        let nav = h.world.resource::<NavGridSet>();
+        let registry = h.world.resource::<UnitRegistry>();
+        let centre = Vec3::new(800.0, 0.0, 600.0);
+        let squares = |facing| {
+            let mut v = nav
+                .structures
+                .squares_of(registry, UnitKind::Window, centre, facing);
+            v.sort();
+            v
+        };
+        let (south, east, north, west) = (squares(0), squares(1), squares(2), squares(3));
+        assert!(!south.is_empty());
+        assert_eq!(south.len(), east.len());
+        assert_eq!(south.len(), north.len());
+        assert_eq!(south.len(), west.len());
+        // North is south turned 180° about the footprint's centre.
+        let sum = |v: &[(u32, u32)]| {
+            v.iter()
+                .fold((0u64, 0u64), |a, &(x, z)| (a.0 + u64::from(x), a.1 + u64::from(z)))
+        };
+        let (s, n) = (sum(&south), sum(&north));
+        let centre_sum = (2 * (centre.x / 8.0) as u64 * south.len() as u64, 2 * (centre.z / 8.0) as u64 * south.len() as u64);
+        assert!(
+            s.0.abs_diff(centre_sum.0 - n.0) <= south.len() as u64
+                && s.1.abs_diff(centre_sum.1 - n.1) <= south.len() as u64,
+            "180° turn: {s:?} {n:?}"
+        );
+    }
 
     fn mask_at(h: &Harness, xsizeh: i32, crushes: bool, p: Vec3) -> bool {
         let nav = h.world.resource::<NavGridSet>();

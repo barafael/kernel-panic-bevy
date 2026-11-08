@@ -48,17 +48,19 @@ pub fn trigger_build_scripts(
         &GlobalTransform,
         Option<&crate::units::lifecycle::construction::Constructing>,
         Option<&crate::units::lifecycle::construction::ClearingFeature>,
+        Option<&crate::units::lifecycle::construction::Repairing>,
         Option<&WasBuilding>,
     )>,
     mut commands: Commands,
 ) {
-    for (entity, mut animator, gtf, constructing, clearing, was) in &mut query {
-        // Clearing a feature off the site works like building
-        // (`SetBuildStanceToward` the feature).
+    for (entity, mut animator, gtf, constructing, clearing, repairing, was) in &mut query {
+        // Clearing a feature off the site, or repairing a unit, works
+        // like building (`SetBuildStanceToward` the work).
         let site = constructing
             .filter(|c| c.building.is_some())
             .map(|c| c.site)
-            .or(clearing.map(|c| c.at));
+            .or(clearing.map(|c| c.at))
+            .or(repairing.map(|r| r.at));
         match (site, was) {
             (Some(site), was) if was.is_none_or(|w| w.site != site) => {
                 let UnitAnimator { rig, driver, .. } = &mut *animator;

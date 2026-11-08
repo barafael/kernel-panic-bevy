@@ -24,7 +24,7 @@ use crate::interaction::selection::Selected;
 use crate::rendering::camera::{MapBounds, RtsCamera, RtsCameraState, intersect_ground_y};
 use crate::units::combat::Dying;
 use crate::units::components::{TeamId, UnitType};
-use crate::units::mechanics::cloak::Spotted;
+use crate::units::mechanics::cloak::{SightedBy, Spotted, radar_blip, team_bit};
 use crate::units::player::LocalTeam;
 use crate::units::team_colors::UnitColor;
 
@@ -337,13 +337,17 @@ impl MinimapState {
     }
 }
 
-#[allow(clippy::type_complexity)]
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn update_minimap(
     time: Res<Time>,
     mut state: ResMut<MinimapState>,
     mut images: ResMut<Assets<Image>>,
     camera_q: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
     unit_q: Query<(&Transform, &UnitColor), With<Spotted>>,
+    // Enemies on radar but not in sight: blips at a drifting point.
+    radar_q: Query<(&Transform, &UnitColor, &SightedBy), Without<Spotted>>,
+    local: Res<LocalTeam>,
+    tick: Option<Res<crate::sim::SimTick>>,
     windows: Query<&Window>,
 ) {
     state.timer.tick(time.delta());
@@ -377,6 +381,23 @@ fn update_minimap(
                     paints.push((idx, [r, g, b, 255]));
                 }
             }
+        }
+    }
+
+    // Radar contacts (`LOS_INRADAR`): one pixel at the apparent position,
+    // `GetObjDrawErrorPos`, so a mine near an Assembler wanders.
+    let frame = tick.map_or(0, |t| t.frame());
+    let bit = team_bit(local.0);
+    for (transform, color, sighted) in &radar_q {
+        if sighted.radar & bit == 0 || sighted.los & bit != 0 {
+            continue;
+        }
+        let at = radar_blip(transform.translation, frame);
+        let (r, g, b) = color_rgb(color.0.color());
+        let mx = ((at.x / state.world_width) * mm_w as f32) as i32;
+        let mz = ((at.z / state.world_depth) * mm_h as f32) as i32;
+        if mx >= 0 && mx < mm_w as i32 && mz >= 0 && mz < mm_h as i32 {
+            paints.push(((mz as usize * mm_w + mx as usize) * 4, [r, g, b, 255]));
         }
     }
 

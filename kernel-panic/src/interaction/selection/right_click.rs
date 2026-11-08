@@ -212,6 +212,8 @@ struct RightClickLookups<'w, 's> {
         ),
     >,
     alliances: Res<'w, Alliances>,
+    /// A friendly unit's health: damaged means repair for a builder.
+    health_q: Query<'w, 's, &'static crate::units::components::Health>,
 }
 
 /// Right-click: single click moves all selected to one point — unless the
@@ -243,6 +245,7 @@ fn handle_right_click(
         queue_end_q,
         features,
         alliances,
+        health_q,
     } = lookups;
     let cursor = windows.single().ok().and_then(|w| w.cursor_position());
     // The enemy of the selection under the cursor (`GetDefaultCmd`'s
@@ -512,16 +515,44 @@ fn handle_right_click(
                 )
             });
             if let Some(friend) = friend {
+                // A constructor's default command on a damaged friend is
+                // Repair (`CBuilderCAI::GetDefaultCmd`, `BuilderCAI.cpp:
+                // 1343-1378`), else Guard like any mobile unit.
+                let damaged = health_q
+                    .get(friend)
+                    .is_ok_and(|h| h.current > 0.0 && h.current < h.max);
+                let repairers: Vec<Entity> = if damaged {
+                    selected_q
+                        .iter()
+                        .filter(|(e, _, u, _)| *e != friend && u.0.is_constructor())
+                        .map(|(e, ..)| e)
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                if !repairers.is_empty()
+                    && let Some(target) = net.id(friend)
+                {
+                    let units = net.units(repairers.iter().copied());
+                    net.issue(SimCommand::Order {
+                        units,
+                        order: Order::Repair(target),
+                        queue: shift,
+                    });
+                }
                 let guards: Vec<Entity> = selected_q
                     .iter()
                     .filter(|(e, _, u, _)| {
                         *e != friend
+                            && !repairers.contains(e)
                             && (unit_registry.speed(u.0) > 0.0 || u.0.takes_rally_orders())
                     })
                     .map(|(e, ..)| e)
                     .collect();
-                if !guards.is_empty() {
-                    if let Some(target) = net.id(friend) {
+                if !guards.is_empty() || !repairers.is_empty() {
+                    if !guards.is_empty()
+                        && let Some(target) = net.id(friend)
+                    {
                         let units = net.units(guards);
                         net.issue(SimCommand::Order {
                             units,

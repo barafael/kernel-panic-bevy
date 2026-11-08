@@ -34,7 +34,7 @@ use crate::{
     units::{
         components::UnitType,
         content::unit_registry::UnitRegistry,
-        lifecycle::construction::{Constructing, PendingBuild},
+        lifecycle::construction::Constructing,
         weapon_fx::batch::{FxQuadBatch, QuadBatches, flush_quad_batches},
     },
 };
@@ -319,10 +319,13 @@ pub struct VentClaimReleaseTimer(pub f32);
 /// a committed / in-progress builder) occupies it.
 ///
 /// The rule is **position-based**: a vent is claimed iff
-/// (a) there's a `PendingBuild` whose `site` coincides with the vent,
-/// (b) there's a `Constructing` whose `site` coincides with the vent,
-/// (b′) a queued `BuildAt` in some `CommandQueue` targets it, or
+/// (b) there's a `Constructing` whose `site` coincides with the vent
+///     (a nanoframe stands there), or
 /// (c) a finished building sits within [`BUILDING_OCCUPANCY_RADIUS`] of the vent.
+///
+/// A build *order* reserves nothing (`CBuilderCAI::GiveCommandReal`
+/// refuses only a site already blocked): the first nanoframe wins and
+/// the other order ends on arrival.
 ///
 /// Adding the stamp side (previously only release was implemented) is
 /// what stops the "0/1 spray keeps pouring out of a vent that already
@@ -341,14 +344,11 @@ pub fn reconcile_vent_claims(
     mut timer: ResMut<VentClaimReleaseTimer>,
     mut commands: Commands,
     vents: Query<(Entity, &GeoventSmoker, Option<&VentClaim>)>,
-    pending: Query<&PendingBuild>,
     constructing: Query<&Constructing>,
     // Roots: `Transform` is world space and the true sim pose
     // (`GlobalTransform` is the last render frame's propagation).
     buildings: Query<(&UnitType, &Transform)>,
     unit_registry: Res<UnitRegistry>,
-    // Queued build orders (Shift-placed sites) keep their vents too.
-    queues: Query<&crate::interaction::movement::CommandQueue>,
 ) {
     timer.0 += time.delta_secs();
     if timer.0 < VENT_CLAIM_RECONCILE_INTERVAL {
@@ -367,24 +367,8 @@ pub fn reconcile_vent_claims(
         grid.insert(i, vent.pos);
     }
     let mut claimed = vec![false; vents.iter().count()];
-    // A committed builder claims the vent its site coincides with
-    // (a, b, b′ above)…
-    let sites = pending
-        .iter()
-        .map(|p| p.site)
-        .chain(constructing.iter().map(|c| c.site))
-        .chain(
-            queues
-                .iter()
-                .flat_map(|q| &q.commands)
-                .filter_map(|c| match c {
-                    crate::interaction::movement::QueuedCommand::BuildAt { site, .. } => {
-                        Some(*site)
-                    }
-                    _ => None,
-                }),
-        );
-    for site in sites {
+    // A nanoframe claims the vent its site coincides with (b above)…
+    for site in constructing.iter().map(|c| c.site) {
         grid.for_each_near(site, SITE_MATCH_SQ, false, |i| claimed[i] = true);
     }
     // …and a finished building near it does (c).
@@ -541,6 +525,7 @@ mod tests {
     use super::*;
     use crate::interaction::movement::{CommandQueue, QueuedCommand};
     use crate::units::content::definitions::UnitKind;
+    use crate::units::lifecycle::construction::PendingBuild;
     use bevy::ecs::system::RunSystemOnce;
 
     fn vent(world: &mut World, x: f32, z: f32, claimed: bool) -> Entity {
@@ -609,9 +594,10 @@ mod tests {
 
         world.run_system_once(reconcile_vent_claims).unwrap();
         let claimed = |e| world.get::<VentClaim>(e).is_some();
-        assert!(claimed(pending));
+        // An order reserves nothing; a nanoframe and a building do.
+        assert!(!claimed(pending), "a pending build order claims nothing");
         assert!(claimed(building));
-        assert!(claimed(queued));
+        assert!(!claimed(queued), "a queued build order claims nothing");
         assert!(claimed(constructing));
         assert!(!claimed(far_building), "released");
         assert!(!claimed(mobile_only), "units don't claim");

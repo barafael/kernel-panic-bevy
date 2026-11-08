@@ -61,33 +61,33 @@ Worm bite range to the near surface, yardmap facing, morph timing.
 
 ## Status (2026-11-09)
 
-Batches 1-5 below are in commits 03c1723 and 6755798 (SIM_VERSION 22,
-goldens re-recorded, `cargo test -p spring-tdf -p kernel-panic` and clippy
-clean). Done from batch 5: Obelisk shell, cannon arc line of fire.
-Not done from batch 5 (see below): DOS sub-beams, Worm bite range,
-yardmap facing, morph timing.
+Batches 1-5 are in commits 03c1723 and 6755798 (SIM_VERSION 21, 22); the
+follow-up pass (SIM_VERSION 23) adds builder repair (`Order::Repair`,
+right-click on a damaged friend), the timed Bug <-> Exploit morph
+(`morphable` / `idle` gates, 88 silent frames, heading and queue kept),
+the Virus release on a finished infected frame, melee range to the target's
+surface, DOS/Gauss sub-beams with falloff, yardmap rotation by build
+facing, no datavent reservation by orders (the AI tracks its own
+constructors' sites), ghosted buildings and minimap radar blips.
 
 ## Still open (observed in-parities)
 
-- Vent reservation: any team's build order claims a datavent, the ghost
-  and the AI read it (`VentClaim`; units-construction #2). The AI relies
-  on the claim to spread its constructors, so it needs its own tracking
-  before the claim can go.
-- Ghosted buildings (scouted enemy buildings vanish), radar icons and
-  minimap blips for radar contacts, a Worm's radar 5 s after it is built.
-- Builders cannot repair; right-click on a damaged ally is Guard for all.
-- Bug <-> Exploit morph is instant (no 5 s gates, 2.9 s animation, queue
-  copy, non-blocking result); a finished Bad Block is despawned without
-  the Virus release.
-- DOS and Gauss beams land in one instant (no sub-beams, no range
-  falloff, 8-frame salvo); Worm bite range is to the midpoint.
-- Yardmap facing for asymmetric Sockets/Windows; Signal flight is only as
-  verified as the thrust/turn-radius change.
-- Unlit unit/terrain materials (no sun/ambient, Bevy tonemapping).
-- KPAI flavour: the Fair budget runs at every difficulty.
-- Minimap has no minimap-drawn orders/formations; Enter as a targeted E;
-  gadget commands cannot be Shift-queued; Packets on an enemy teleporter
-  attack instead of being refused.
-- Fight diverts and idle engagement ignore the Fire State (no hold-fire
+- The morph's result is a blocking unit (upstream `SetUnitBlocking(nu,
+  false)` lets units walk through a deployed Exploit); the morph shows no
+  flip/dissolve animation.
+- Ghosted buildings are drawn as they are (not dimmed) and vanish when the
+  building dies unseen (the engine keeps the stale ghost).
+- A Worm's radar and seismic sense do not start 5 s after it is built.
+- Repair does not assist-build nanoframes; Guard/Repair on a nanoframe is
+  not special-cased.
+- Unlit unit/terrain materials (no sun/ambient, Bevy tonemapping): a look
+  decision, not changed.
+- KPAI flavour: the Fair budget runs at every difficulty (a design choice
+  of the remake's slack ladder).
+- Minimap-drawn formations, Enter as a targeted `E`, Shift-queued gadget
+  commands, Packets on an enemy teleporter attack instead of being refused.
+- Fight diverts and idle engagement ignore a Fire State (no hold-fire
   setting exists); the fight resume uses the leg's goal, not the engine's
   re-pathed line.
+- The Signal's flight constants follow the engine source but were not
+  compared with the original's flight time.

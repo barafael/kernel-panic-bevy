@@ -357,6 +357,12 @@ pub struct TargetCachePick<'w, 's> {
 }
 
 impl TargetCachePick<'_, '_> {
+    /// The collision radius of `target` (0 when it is gone): the surface
+    /// a melee weapon's range is measured to.
+    fn hit_radius_of(&self, target: Entity) -> f32 {
+        self.alive.get(target).map_or(0.0, |(_, stats)| stats.hit_radius)
+    }
+
     /// Aim position of `target` — its model midpoint, `unit->aimPos`
     /// (`SolidObject::UpdateMidAndAimPos`) — if it is alive and `team`
     /// has it in sight or on radar (`CWeapon::TestTarget`); a radar-only
@@ -681,10 +687,15 @@ pub(super) fn fire_salvo_shot(
             .and_then(|name| pieces.animator.get(shot.attacker).ok()?.rig.piece(name))
             .and_then(|index| pieces.piece_emit(shot.attacker, attacker_gtf, index))
             .map(|emit| emit.pos);
-        let aim = shot
-            .target
-            .and_then(|t| pieces.lead_target_pos(t, muzzle.pos, weapon_def, shot.predict_mult))
-            .unwrap_or(shot.aim_pos);
+        // The sub-beams of one salvo run along the line of the first
+        // (the aim point is frozen with the salvo).
+        let aim = if is_sub_beam_weapon(weapon_def) {
+            shot.aim_pos
+        } else {
+            shot.target
+                .and_then(|t| pieces.lead_target_pos(t, muzzle.pos, weapon_def, shot.predict_mult))
+                .unwrap_or(shot.aim_pos)
+        };
         let aim_dist = muzzle.pos.distance(aim);
         if cannon {
             // `CCannon::FireImpl`: spray the ballistic solve, aim at the
@@ -737,6 +748,16 @@ pub(super) fn fire_salvo_shot(
                 (struck, impact_pos) =
                     pieces.hitscan_trace(shot.target, muzzle.pos, dir, weapon_def.range);
             }
+            // A sub-beam deals `1 / salvoSize` of the damage, less the
+            // farther it ran: `max(minIntensity, 1 − d / (2 · range))`
+            // (`BeamLaser.cpp:419-423`; KP sets no `minIntensity`).
+            let scale = if is_sub_beam_weapon(weapon_def) && traced {
+                let ran = muzzle.pos.distance(impact_pos);
+                let intensity = (1.0 - ran / (weapon_def.range * 2.0)).det_max(0.0);
+                intensity / salvo_size(weapon_def) as f32
+            } else {
+                1.0
+            };
             damage_queue.push(PendingDamage {
                 target: struck,
                 attacker: shot.attacker,
@@ -744,6 +765,7 @@ pub(super) fn fire_salvo_shot(
                 impact_pos,
                 attacker_distance: aim_dist,
                 detonated: false,
+                scale,
             });
             // Hitscan explodes at fire time (`CGameHelper::Explosion`).
             sounds.explosion(weapon_def, impact_pos);
@@ -780,6 +802,43 @@ impl RngStream for TargetingRng {
 pub struct GroundFireRng;
 impl RngStream for GroundFireRng {
     const SALT: u64 = 0xBADC_0FFE;
+}
+
+/// A beam laser that fires `beamtime · 30` one-frame sub-beams along one
+/// line instead of a single hit (`CBeamLaser`, not `beamburst`): the DOS
+/// and the Gauss cannon.
+pub(crate) fn is_sub_beam_weapon(weapon_def: &spring_tdf::WeaponDef) -> bool {
+    weapon_def.category() == spring_tdf::WeaponCategory::BeamLaser && !weapon_def.beam_burst
+}
+
+/// Shots in a salvo: `burst`, or for a sub-beam weapon `salvoSize =
+/// max(1, int(beamtime · 30))` with no delay between them
+/// (`BeamLaser.cpp:105-110`).
+pub(crate) fn salvo_size(weapon_def: &spring_tdf::WeaponDef) -> u32 {
+    if is_sub_beam_weapon(weapon_def) {
+        ((weapon_def.beam_time * crate::sim::GAME_SPEED) as u32).max(1)
+    } else {
+        (weapon_def.burst as u32).max(1)
+    }
+}
+
+/// Frames a salvo takes from its first shot to its last: a weapon fires
+/// again only once the reload is over *and* the salvo is done.
+pub(crate) fn salvo_frames(weapon_def: &spring_tdf::WeaponDef) -> u64 {
+    let delay = if is_sub_beam_weapon(weapon_def) {
+        1
+    } else {
+        salvo_delay_frames(weapon_def.burst_rate).max(1)
+    };
+    u64::from(salvo_size(weapon_def) - 1) * delay + 1
+}
+
+/// The cooldown after a shot: the reload, or the salvo if it is longer.
+pub(crate) fn cooldown_after_shot(frame: u64, weapon_def: &spring_tdf::WeaponDef) -> AttackCooldown {
+    let reload = AttackCooldown::after_reload(frame, weapon_def.reload_time);
+    AttackCooldown {
+        ready_frame: reload.ready_frame.max(frame + salvo_frames(weapon_def)),
+    }
 }
 
 /// `salvoDelay = int(burstRate * GAME_SPEED)` (`WeaponLoader.cpp:171`):
@@ -921,6 +980,8 @@ pub fn combat_system(
             Without<Dying>,
             Without<crate::units::spawning::Emerging>,
             Without<Stunned>,
+            // A Bug or Exploit in its deploy script neither aims nor fires.
+            Without<super::mechanics::deploy::MorphSilenced>,
             // Unarmed / command-fire kinds (tagged by
             // `bookkeeping::tag_unit_kinds`) never reach the pick below;
             // an untagged unit still takes the no-weapon exit.
@@ -1028,6 +1089,7 @@ pub fn combat_system(
                     impact_pos: ground,
                     attacker_distance: 0.0,
                     detonated: false,
+                    scale: 1.0,
                 });
                 pending_explosions.events.push(ExplosionEvent {
                     pos: ground,
@@ -1055,8 +1117,17 @@ pub fn combat_system(
         // midpoint here (no `AimFromWeapon` piece lookup).
         let aim_from = stats.mid_pos(attacker_gtf);
         let map_gravity = pieces.map_gravity();
-        let in_range =
-            |pos: Vec3| aim::in_weapon_range(weapon_def, aim_from, pos, false, map_gravity);
+        // `radius` is the target's collision radius: a melee weapon
+        // measures to its surface (`targetBorder`).
+        let in_range = |pos: Vec3, radius: f32| {
+            aim::in_weapon_range(
+                weapon_def,
+                aim_from,
+                aim::surface_reach(weapon_def, aim_from, pos, radius),
+                false,
+                map_gravity,
+            )
+        };
 
         // Straight-firing weapons can't shoot through terrain; arcs
         // clear ridges (`ground_line_of_fire`).
@@ -1115,7 +1186,7 @@ pub fn combat_system(
         // it can't see).
         if let Ok(forced) = explicit.forced.get(entity) {
             match target_pick.visible_pos(forced.0, attacker_team.0, frame) {
-                Some(t_pos) if in_range(t_pos) => {
+                Some(t_pos) if in_range(t_pos, target_pick.hit_radius_of(forced.0)) => {
                     if try_lof(t_pos) {
                         let rank = rank_of(attacker_pos.distance_squared(t_pos));
                         best = Some((forced.0, t_pos, rank, TargetSource::Explicit));
@@ -1145,7 +1216,7 @@ pub fn combat_system(
         if best.is_none()
             && let Ok(order) = explicit.ordered.get(entity)
             && let Some(t_pos) = target_pick.visible_pos(order.target, attacker_team.0, frame)
-            && in_range(t_pos)
+            && in_range(t_pos, target_pick.hit_radius_of(order.target))
         {
             if try_lof(t_pos) {
                 let rank = rank_of(attacker_pos.distance_squared(t_pos));
@@ -1172,7 +1243,7 @@ pub fn combat_system(
                     // ally) fails `TryTarget` and is replaced by a scan now
                     // (`AllowWeaponAutoTarget`).
                     if let Some(pos) = target_pick.visible_pos(target, attacker_team.0, frame)
-                        && in_range(pos)
+                        && in_range(pos, target_pick.hit_radius_of(target))
                         && try_lof(pos)
                     {
                         let rank = rank_of(attacker_pos.distance_squared(pos));
@@ -1234,7 +1305,7 @@ pub fn combat_system(
                 } else {
                     candidate.mid_pos()
                 };
-                if !in_range(aim_pos) {
+                if !in_range(aim_pos, candidate.hit_radius) {
                     return;
                 }
                 let dist_sq = attacker_pos.distance_squared(candidate.pos);
@@ -1399,7 +1470,7 @@ pub fn combat_system(
             continue;
         }
         commands.entity(entity).insert((
-            AttackCooldown::after_reload(frame, weapon_def.reload_time),
+            cooldown_after_shot(frame, weapon_def),
             JustFired,
         ));
         if let Some(weapon) = weapon {
@@ -1482,7 +1553,7 @@ fn open_salvo(
     commands: &mut Commands,
     rng: &mut u32,
 ) {
-    let burst = (weapon_def.burst as u32).max(1);
+    let burst = salvo_size(weapon_def);
     fire_salvo_shot(
         &shot,
         weapon_def,
@@ -1496,7 +1567,11 @@ fn open_salvo(
         rng,
     );
     if burst > 1 {
-        let delay = salvo_delay_frames(weapon_def.burst_rate);
+        let delay = if is_sub_beam_weapon(weapon_def) {
+            0
+        } else {
+            salvo_delay_frames(weapon_def.burst_rate)
+        };
         commands.entity(shot.attacker).insert(BurstFire {
             shot,
             shots_remaining: burst - 1,
@@ -1800,7 +1875,7 @@ pub fn attack_ground_system(
         // Fire.
         let is_traveling = weapon_def.is_traveling();
         commands.entity(entity).insert((
-            AttackCooldown::after_reload(frame, weapon_def.reload_time),
+            cooldown_after_shot(frame, weapon_def),
             JustFired,
         ));
         // The salvo's remaining shots go through `BurstFire` exactly like
@@ -1989,9 +2064,17 @@ pub fn attack_target_system(
         } else {
             0.0
         };
+        let target_radius = target_stats.map_or(0.0, |s| s.hit_radius);
         let in_range = weapon_def.is_some_and(|w| {
             w.range != 0.0
-                && aim::in_weapon_range_slack(w, aim_from, aim_at, false, map_gravity, slack)
+                && aim::in_weapon_range_slack(
+                    w,
+                    aim_from,
+                    aim::surface_reach(w, aim_from, aim_at, target_radius),
+                    false,
+                    map_gravity,
+                    slack,
+                )
         });
         // In range with the terrain, a feature or (`avoidfriendly`) an
         // ally in the way (the tests `combat_system` fires on): keep
@@ -3491,5 +3574,21 @@ mod tests {
         let off = launch.angle_between(solve);
         assert!(off < 0.05, "spray ≈ 2.4° at most, got {off} rad");
         assert!(launch.y > 0.2, "a lob, not a flat shot: {launch}");
+    }
+
+    /// The DOS beam is `beamtime · 30` = 8 one-frame sub-beams, and a new
+    /// salvo waits for the last: it fires every 8 frames, not every
+    /// 7 (`reloadtime=0.25`). Weapons that are not sub-beam lasers keep
+    /// their `burst`.
+    #[test]
+    fn the_dos_beam_is_eight_sub_beams() {
+        let weapons = WeaponRegistry::load();
+        let dos = weapons.by_kind(WeaponKind::DosBeam);
+        assert!(is_sub_beam_weapon(dos));
+        assert_eq!(salvo_size(dos), 8);
+        assert_eq!(salvo_frames(dos), 8);
+        assert_eq!(cooldown_after_shot(100, dos).ready_frame, 108);
+        let bit = weapons.by_kind(WeaponKind::Line);
+        assert!(!is_sub_beam_weapon(bit));
     }
 }
