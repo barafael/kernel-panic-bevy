@@ -199,8 +199,13 @@ pub const LUA_ABILITY_RELOAD: f32 = 90.0 * 32.0 / 30.0;
 /// Upstream's `CMD_FIREWALL` is an `ICON_MAP` command run straight from
 /// `CommandFallback` — `GetUnitsInCylinder(x, z, 300)` around the click
 /// with no range check — so the Firewall reaches any point on the map.
+/// The cylinder is a plane test: height plays no part, so a Flow at its
+/// cruise altitude is covered like the ground units below it.
 pub const FIREWALL_RADIUS: f32 = 300.0;
-pub const FIREWALL_DURATION: f32 = 20.0;
+/// `protected[u] = GetGameFrame() + protectionTime * 32` with
+/// `protectionTime = 20`: 640 sim frames, 21.33 s at 30 Hz (the same
+/// 32-per-second counting as [`LUA_ABILITY_RELOAD`]).
+pub const FIREWALL_DURATION: f32 = 20.0 * 32.0 / 30.0;
 pub const FIREWALL_COOLDOWN: f32 = LUA_ABILITY_RELOAD;
 /// Fraction of incoming non-paralyzer damage that a Protected unit
 /// *takes* (`network_reflectorshield.lua` `UnitPreDamaged`: `damage*0.5`).
@@ -1189,7 +1194,8 @@ fn apply_firewall(
         if !alliances.friendly(team.0, caster_team) {
             continue;
         }
-        if gtf.translation().distance_squared(center) > radius_sq {
+        // `GetUnitsInCylinder(x, z, 300)`: distance on the ground plane.
+        if gtf.translation().xz().distance_squared(center.xz()) > radius_sq {
             continue;
         }
         commands.entity(entity).insert(Protected {
@@ -1746,6 +1752,46 @@ mod tests {
         for kind in [UnitKind::Pointer, UnitKind::Obelisk, UnitKind::Byte] {
             assert!(initial_cooldown(kind).is_none());
         }
+    }
+
+    /// `network_reflectorshield.lua`: `protected[u]` lasts `protectionTime
+    /// * 32` = 640 frames (21.33 s at 30 Hz), and the targets come from
+    /// `GetUnitsInCylinder(x, z, 300)`: height is no part of the test, so
+    /// a Flow at its cruise altitude is covered like the ground below it.
+    #[test]
+    fn firewall_protects_a_plane_cylinder_for_640_frames() {
+        use bevy::ecs::system::RunSystemOnce;
+        assert!((FIREWALL_DURATION * 30.0 - 640.0).abs() < 1e-3);
+
+        let mut world = World::new();
+        let spawn = |world: &mut World, team: u8, pos: Vec3| {
+            world
+                .spawn((
+                    TeamId(team),
+                    Health::full(100.0),
+                    GlobalTransform::from_translation(pos),
+                ))
+                .id()
+        };
+        let centre = Vec3::new(1000.0, 10.0, 1000.0);
+        let on_ground = spawn(&mut world, 0, centre + Vec3::new(290.0, 0.0, 0.0));
+        let flying = spawn(&mut world, 0, centre + Vec3::new(0.0, 140.0, 290.0));
+        let beyond = spawn(&mut world, 0, centre + Vec3::new(310.0, 0.0, 0.0));
+        let enemy = spawn(&mut world, 1, centre);
+        let alliances = Alliances::default();
+        world
+            .run_system_once(
+                move |targets: Query<(Entity, &TeamId, &GlobalTransform), With<Health>>,
+                      mut commands: Commands| {
+                    apply_firewall(centre, 0, &alliances, &targets, &mut commands);
+                },
+            )
+            .unwrap();
+        let protected = |e| world.get::<Protected>(e).map(|p| p.remaining);
+        assert_eq!(protected(on_ground), Some(FIREWALL_DURATION));
+        assert_eq!(protected(flying), Some(FIREWALL_DURATION));
+        assert_eq!(protected(beyond), None, "300 elmos on the plane is the edge");
+        assert_eq!(protected(enemy), None, "only the caster's ally team");
     }
 
     fn cast_app(units: &[(&str, f32)]) -> App {

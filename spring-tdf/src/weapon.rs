@@ -70,7 +70,10 @@ pub struct WeaponDef {
     /// beam instead of sitting still. 0 = no scrolling.
     pub scroll_speed: f32,
     /// Radius (in thickness-multiples) of the end-flare drawn at the
-    /// beam origin for `BeamLaser` weapons. 0 = no flare.
+    /// beam origin for `BeamLaser` weapons: `laserFlareSize`, the
+    /// engine's 15 when the TDF leaves it out (`WeaponDef.cpp:263`). An
+    /// authored 0 is no flare (the DOS_Beam). `Default::default()` is
+    /// 0 — a hand-built def has none.
     pub laser_flare_size: f32,
     /// When true, a beam-weapon laser that runs out of range stops at
     /// max extent rather than fading; matches upstream `hardstop=1`.
@@ -516,12 +519,14 @@ impl WeaponDef {
     /// distance from attacker to target. Returns 1.0 for weapons that
     /// don't set `dyn_damage_exp` — i.e. most weapons keep flat damage.
     ///
-    /// With `dynDamageInverted=1` (BugCannon), the multiplier is
-    /// `(dist / dyn_damage_range)^exp` — farther targets take more.
-    /// Otherwise it's `(1 - dist / dyn_damage_range)^exp` — falls off
-    /// with distance. Always clamped to [0, 1].
+    /// `DynDamageArray::GetDynamicDamages`: with `t` the distance as a
+    /// fraction of the range (clamped to 1) the engine's `damageMod` is
+    /// `1 - t^exp`. A plain weapon deals `damageMod` — falling off with
+    /// distance — while `dynDamageInverted=1` (BugCannon) deals
+    /// `1 - damageMod = t^exp`: farther targets take more. Always in
+    /// [0, 1].
     pub fn dyn_damage_multiplier(&self, dist: f32) -> f32 {
-        if self.dyn_damage_exp == 0.0 {
+        if self.dyn_damage_exp <= 0.0 {
             return 1.0;
         }
         let denom = if self.dyn_damage_range > 0.0 {
@@ -532,8 +537,12 @@ impl WeaponDef {
             return 1.0;
         };
         let t = (dist / denom).det_clamp(0.0, 1.0);
-        let base = if self.dyn_damage_inverted { t } else { 1.0 - t };
-        libm::powf(base, self.dyn_damage_exp)
+        let t_exp = libm::powf(t, self.dyn_damage_exp);
+        if self.dyn_damage_inverted {
+            t_exp
+        } else {
+            1.0 - t_exp
+        }
     }
 }
 
@@ -583,7 +592,7 @@ impl WeaponDef {
             beam_ttl: s.f32("beamttl"),
             beam_decay: s.f32_or("beamdecay", 1.0),
             scroll_speed: s.f32("scrollspeed"),
-            laser_flare_size: s.f32("laserflaresize"),
+            laser_flare_size: s.f32_or("laserflaresize", 15.0),
             hard_stop: s.bool("hardstop"),
 
             weapon_velocity: s.f32("weaponvelocity"),

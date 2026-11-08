@@ -94,12 +94,20 @@ use super::state::Fnv;
 /// call off (`Ctrl+D` again); a start leaves a running countdown its
 /// time. A `Build` goes in instead of the builder's orders, behind them
 /// or (Alt) at the head of its queue.
+/// 21 (2026-11-08, parity review): a unit at 0 HP takes no further hit
+/// that frame (`DoDamage`'s `isDead`); a paralyzed unit's self-destruct
+/// countdown and a paralyzed Logic Bomb's trigger stand still, and its
+/// weapons stop reloading (`++reloadStatus` per stunned frame); the
+/// Firewall protects for 640 frames (21.3 s) within a 300-elmo plane
+/// cylinder; a Flow's starburst range counts `heightmod` twice
+/// (`CStarburstLauncher::GetRange2D`); and `Sign(0)` is -1 as in the
+/// engine (exact ties in the push, avoidance and strafe signs).
 ///
 /// [`SimCommand::Dropped`]: crate::net::SimCommand::Dropped
 /// [`SimCommand::Returned`]: crate::net::SimCommand::Returned
 /// [`SimCommand::InternalSpeed`]: crate::net::SimCommand::InternalSpeed
 /// [`MatchRules`]: crate::net::MatchRules
-pub const SIM_VERSION: u32 = 20;
+pub const SIM_VERSION: u32 = 21;
 
 /// The map-independent half of [`Compat`]: what a peer announces when
 /// it joins a room, before any map is chosen.

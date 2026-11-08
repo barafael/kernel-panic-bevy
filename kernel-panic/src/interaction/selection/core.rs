@@ -173,6 +173,8 @@ fn update_hover(
     camera_q: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
     mut ray_cast: PickRayCast,
     unit_q: Query<Entity, With<UnitType>>,
+    // A corpse is no longer a unit to pick (`Selected` is `AliveOnly`).
+    dying_q: Query<(), With<crate::units::combat::Dying>>,
     parent_q: Query<&ChildOf>,
     hovered_q: Query<Entity, With<Hovered>>,
     mut cache: Local<HoverCache>,
@@ -190,7 +192,8 @@ fn update_hover(
     cache.frames_since_cast = 0;
 
     let target = cursor_ray(&windows, &camera_q)
-        .and_then(|ray| resolve_unit_hit(ray_cast.cast(ray), &unit_q, &parent_q));
+        .and_then(|ray| resolve_unit_hit(ray_cast.cast(ray), &unit_q, &parent_q))
+        .filter(|&unit| !dying_q.contains(unit));
 
     let mut already = false;
     for entity in &hovered_q {
@@ -222,10 +225,19 @@ fn handle_selection(
     camera_q: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
     hovered_q: Query<Entity, With<Hovered>>,
     selected_q: Query<Entity, With<Selected>>,
-    unit_q: Query<(Entity, &GlobalTransform, &TeamId), With<UnitType>>,
+    // The box, the double-click and `Q` skip units that are already
+    // dying: `Dying` ended their place in the selection (`AliveOnly`),
+    // and nothing that acts on the selection skips corpses.
+    unit_q: Query<
+        (Entity, &GlobalTransform, &TeamId),
+        (With<UnitType>, Without<crate::units::combat::Dying>),
+    >,
     kind_team_q: Query<(&UnitType, &TeamId)>,
     local: Res<crate::units::player::LocalTeam>,
-    same_kind_q: Query<(Entity, &UnitType, &TeamId, &GlobalTransform, &Visibility)>,
+    same_kind_q: Query<
+        (Entity, &UnitType, &TeamId, &GlobalTransform, &Visibility),
+        Without<crate::units::combat::Dying>,
+    >,
     mut box_nodes: Query<&mut Node, With<SelectionBoxNode>>,
     modes: Res<crate::interaction::ability::OrderCursorModes>,
     mut drag_state: ResMut<DragState>,
@@ -422,7 +434,10 @@ fn select_same_type_on_screen(
     camera_q: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
     local: Res<crate::units::player::LocalTeam>,
     selected_q: Query<(Entity, &UnitType), With<Selected>>,
-    units: Query<(Entity, &UnitType, &TeamId, &GlobalTransform, &Visibility)>,
+    units: Query<
+        (Entity, &UnitType, &TeamId, &GlobalTransform, &Visibility),
+        Without<crate::units::combat::Dying>,
+    >,
     mut commands: Commands,
 ) {
     if !keys.just_pressed(KeyCode::KeyQ)

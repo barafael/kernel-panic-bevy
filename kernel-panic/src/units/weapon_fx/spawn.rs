@@ -656,16 +656,6 @@ fn beam_texture_names(weapon: &spring_tdf::WeaponDef) -> (&str, &str) {
     }
 }
 
-/// `laserFlareSize` with the engine default of 15: the BeamLaser's
-/// emitter flare is `thickness · laserFlareSize` elmos half-size.
-fn laser_flare_size(weapon: &spring_tdf::WeaponDef) -> f32 {
-    if weapon.laser_flare_size > 0.0 {
-        weapon.laser_flare_size
-    } else {
-        15.0
-    }
-}
-
 /// Spawn a `BeamLaser` hit-scan ribbon from attacker to target.
 ///
 /// Mirrors the upstream two-pass draw in
@@ -758,11 +748,15 @@ fn spawn_textured_beam(
                           model_cache: &mut S3OModelCache,
                           cache: &mut BeamMaterialCache|
      -> Option<(Handle<StandardMaterial>, f32)> {
-        if !is_beam_laser {
+        // The emitter flare is `thickness · laserFlareSize` elmos
+        // half-size (`BeamLaserProjectile::Draw`; the TDF parser supplies
+        // the engine's default of 15), so an authored 0 — the DOS_Beam's —
+        // draws none.
+        if !is_beam_laser || weapon.laser_flare_size <= 0.0 {
             return None;
         }
         let (handle, _) = beam_texture("flare", model_cache, images)?;
-        let half = thickness * laser_flare_size(weapon);
+        let half = thickness * weapon.laser_flare_size;
         Some((
             cache.get_or_create_textured(color, true, intensity, Some(handle), materials),
             half,

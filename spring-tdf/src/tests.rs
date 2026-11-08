@@ -614,6 +614,27 @@ fn dyn_damage_multiplier_inverted_grows_with_distance() {
 }
 
 #[test]
+fn dyn_damage_multiplier_falls_off_as_one_minus_t_to_the_exp() {
+    // `GetDynamicDamages`: `damageMod = 1 - (travDist / range)^exp`, not
+    // `(1 - travDist / range)^exp` — the two differ once exp != 1.
+    let tdf = Tdf::parse(
+        r#"
+[Fading]
+{
+    range=800;
+    dynDamageExp=2;
+}
+"#,
+    )
+    .unwrap();
+    let defs = WeaponDefs::from_tdf(&tdf);
+    let w = defs.get("Fading").unwrap();
+    assert!((w.dyn_damage_multiplier(0.0) - 1.0).abs() < 1e-5);
+    assert!((w.dyn_damage_multiplier(400.0) - 0.75).abs() < 1e-5);
+    assert!((w.dyn_damage_multiplier(800.0) - 0.0).abs() < 1e-5);
+}
+
+#[test]
 fn dyn_damage_multiplier_flat_when_exp_zero() {
     let tdf = Tdf::parse(
         r#"
@@ -1382,4 +1403,33 @@ mod proptests {
             prop_assert_eq!(c.unwrap().get("x"), Some(val.as_str()));
         }
     }
+}
+
+#[test]
+fn laser_flare_size_defaults_to_15_and_keeps_an_authored_zero() {
+    // `WeaponDef.cpp:263`: `laserFlareSize` defaults to 15 elmos; the
+    // DOS_Beam authors 0, which draws no flare.
+    let tdf = Tdf::parse(
+        r#"
+[Plain]
+{
+    beamlaser=1;
+}
+[Dos]
+{
+    beamlaser=1;
+    laserflaresize=0;
+}
+[Build]
+{
+    beamlaser=1;
+    laserflaresize=2.5;
+}
+"#,
+    )
+    .unwrap();
+    let defs = WeaponDefs::from_tdf(&tdf);
+    assert_eq!(defs.get("Plain").unwrap().laser_flare_size, 15.0);
+    assert_eq!(defs.get("Dos").unwrap().laser_flare_size, 0.0);
+    assert_eq!(defs.get("Build").unwrap().laser_flare_size, 2.5);
 }
