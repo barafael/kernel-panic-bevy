@@ -311,6 +311,13 @@ impl UnitRegistry {
         self.hexfarm_medians
     }
 
+    /// `UnitDef::power`: the unit's cost (`BuildCostMetal`; KP has no
+    /// metal economy, but the engine's target priority still divides by
+    /// it), at least 1.
+    pub fn power(&self, kind: UnitKind) -> f32 {
+        self.def(kind).map_or(1.0, |d| d.build_cost_metal.det_max(1.0))
+    }
+
     /// Maximum health (FBI `MaxDamage`).
     pub fn max_health(&self, kind: UnitKind) -> f32 {
         self.def(kind).map_or(0.0, |d| d.max_health)

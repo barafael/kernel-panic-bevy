@@ -539,12 +539,14 @@ pub struct OrderState {
     bombard: Has<crate::units::mechanics::deploy::BombardOrder>,
     entering: Has<crate::units::mechanics::network_buffer::EnterOrder>,
     dispatching: Has<crate::units::mechanics::network_buffer::DispatchOrder>,
+    /// A fight leg turned aside to attack: the leg is still the order.
+    fight_detour: Has<crate::units::combat::engage::FightGoal>,
 }
 
 impl OrderStateItem<'_, '_> {
     /// The unit is executing an order.
     pub fn active(&self) -> bool {
-        self.move_target || self.steers() || self.dispatching
+        self.move_target || self.steers() || self.dispatching || self.fight_detour
     }
 
     /// The active order is one that steers the unit through a
@@ -730,18 +732,32 @@ pub fn chase_path_stale(path: Option<&MovePath>, target: Vec3) -> bool {
 /// [`chase_path_stale`], like the attack chase); inside it, settle and
 /// let the auto-attack path engage anything in range. When the target
 /// dies the guard order ends and the queue moves on.
+#[allow(clippy::type_complexity)]
 pub fn guard_follow_system(
     mut commands: Commands,
-    guards: Query<(Entity, &GlobalTransform, &UnitStats, &GuardTarget), Without<Dying>>,
-    targets: Query<(&GlobalTransform, &UnitStats), Without<Dying>>,
+    // A guard chasing an attacker has an attack order of its own; the
+    // chase is that system's.
+    guards: Query<
+        (Entity, &GlobalTransform, &UnitStats, &GuardTarget),
+        (Without<Dying>, Without<AttackTargetOrder>),
+    >,
+    targets: Query<
+        (
+            &GlobalTransform,
+            &UnitStats,
+            Option<&crate::units::combat::engage::LastAttacker>,
+        ),
+        Without<Dying>,
+    >,
     move_path_q: Query<&MovePath>,
+    tick: Res<crate::sim::SimTick>,
 ) {
     for (entity, gtf, stats, guard) in &guards {
         // Buildings have nobody to trail.
         if stats.speed <= 0.0 {
             continue;
         }
-        let Ok((target_gtf, target_stats)) = targets.get(guard.0) else {
+        let Ok((target_gtf, target_stats, attacker)) = targets.get(guard.0) else {
             // Target gone: the order ends; `advance_command_queue`
             // promotes whatever is queued behind it.
             commands
@@ -750,6 +766,17 @@ pub fn guard_follow_system(
             continue;
         };
 
+        // `ExecuteGuard`: whatever hit the guarded unit in the last 40
+        // frames is attacked; the guard resumes when it is dealt with.
+        if let Some(attacker) = attacker.filter(|a| {
+            tick.frame().saturating_sub(a.frame) < crate::units::combat::engage::GUARD_RETALIATION_FRAMES
+                && targets.contains(a.entity)
+        }) {
+            commands.entity(entity).insert(AttackTargetOrder {
+                target: attacker.entity,
+            });
+            continue;
+        }
         let target_pos = target_gtf.translation();
         let keep = target_stats.radius + GUARD_DISTANCE;
         let dist = gtf.translation().distance(target_pos);

@@ -826,8 +826,13 @@ async fn prepare_map(spring_map: spring_map::SpringMap, inputs: PrepareInputs) -
         header.typemap_height(),
         &terrain_types,
     );
+    // Water slows ground units and steers the pathfinder around it.
+    let terrain_speed = match crate::map_events::WaterDamage::for_map(&inputs.map_name) {
+        Some(water) => terrain_speed.with_water(&heights, header.heightmap_width(), water.0),
+        None => terrain_speed,
+    };
     if !terrain_speed.is_neutral() {
-        info!("  terrain types change ground speed");
+        info!("  terrain types or water change ground speed");
     }
 
     info!(

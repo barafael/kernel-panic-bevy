@@ -50,8 +50,7 @@ const SIGNAL_MODEL: &str = "signal.s3o";
 const SIGTERM_BOMB_MODEL: &str = "sigterm.s3o";
 
 /// Lazily-loaded mesh + per-faction material handles for the two
-/// SIGTERM visual stages. Mirrors `DeathParticleAssets` /
-/// `BuildSparkleAssets`. The 90 s SIGTERM cooldown means cache
+/// SIGTERM visual stages. Mirrors `BuildSparkleAssets`. The 90 s SIGTERM cooldown means cache
 /// misses are rare anyway, but caching keeps the per-cast spawn
 /// allocation-free and avoids leaking a fresh `StandardMaterial`
 /// per cast.
@@ -259,15 +258,20 @@ pub const SIGTERM_COOLDOWN: f32 = LUA_ABILITY_RELOAD;
 /// The height the Signal holds above the ground: `CStrafeAirMoveType`'s
 /// `wantedHeight = cruiseAlt × 1.5` (signal.fbi `cruiseAlt=200`).
 pub const SIGTERM_CRUISE_HEIGHT: f32 = 300.0;
-/// Thrust, elmos/frame²: signal.fbi `Acceleration=2`.
-const SIGTERM_ACC: f32 = 2.0;
+/// Thrust, elmos/frame²: the engine's `maxAcc` default for fighters and
+/// bombers (`UnitDef.cpp:641`, `udTable.GetFloat("maxAcc", 0.065f)`),
+/// which replaces signal.fbi's `Acceleration=2` — the Signal carries a
+/// bomber weapon.
+const SIGTERM_ACC: f32 = 0.065;
 /// Air drag per frame (`SetMaxSpeed`: `1 / (maxSpeed · 1.1 / accRate)
-/// − wingAngle² · wingDrag`, `MaxVelocity=8`): with the thrust above, a
-/// top speed of about 6.8 elmos/frame (205 elmos/s).
+/// − wingAngle² · wingDrag`, `MaxVelocity=8`): the thrust above gives a
+/// long run-up (a time constant of about 144 frames) to a top speed near
+/// `1.1 · maxSpeed`.
 const SIGTERM_DRAG: f32 = 1.0 / (8.0 * 1.1 / SIGTERM_ACC) - 0.08 * 0.08 * 0.07;
-/// The engine's airplane turn radius (`turnRadius` default 500 elmos):
-/// a turn at speed `v` is at most `v / 500` radians per frame.
-const SIGTERM_TURN_RADIUS: f32 = 500.0;
+/// The engine's bomber turn radius: `turnRadius` defaults to 500 elmos
+/// and `UnitDef.cpp:640` doubles it for a bomber that leaves it unset. A
+/// turn at speed `v` is at most `v / 1000` radians per frame.
+const SIGTERM_TURN_RADIUS: f32 = 1000.0;
 /// While climbing out it swings toward the target at `maxRudder`
 /// (0.004) per elmo/frame of climb (`UpdateTakeOff`).
 const SIGTERM_TAKEOFF_RUDDER: f32 = 0.004;
@@ -282,9 +286,11 @@ const SIGTERM_LOOKAHEAD_FRAMES: f32 = 40.0;
 /// The bomb's gravity, elmos/frame² (`[SigTerm]` `myGravity=.3`).
 const SIGTERM_BOMB_GRAVITY: f32 = 0.3;
 /// The bomb's release window: `CBombDropper::TestRange` drops when the
-/// predicted landing point is within `salvoDelay · speed · 0.5` of the
-/// target (`burstrate=.6` → 18 frames).
-const SIGTERM_SALVO_FRAMES: f32 = 18.0;
+/// predicted landing point is within `max(1, salvoSize − 1) · salvoDelay ·
+/// speed · 0.5` of the target. `weapondefs_post.lua` rewrites a
+/// `manualBombSettings` bomb with `reloadtime >= 0.5` to `burst=2`,
+/// `burstrate=min(0.4, reloadtime)`: one salvo gap of 0.4 s → 12 frames.
+const SIGTERM_SALVO_FRAMES: f32 = 12.0;
 /// signal.bos `Create`: `call-script lua_Destroy()` after 120 s.
 const SIGTERM_MAX_FRAMES: u32 = 120 * 30;
 /// Gravity on the broken-up airframe (the engine's plane `myGravity`).
@@ -681,7 +687,6 @@ pub fn process_command_fire(
     health_q: Query<&Health>,
     live_units: Query<(&UnitType, &TeamId), Without<Dying>>,
     mine_spawns: Res<MineSpawnQueue>,
-    mut pending_explosions: ResMut<PendingExplosions>,
     mut visuals: SigTermVisuals,
     gravity: Option<Res<crate::sim::MapGravity>>,
     mut sounds: Option<ResMut<crate::audio::SoundQueue>>,
@@ -820,38 +825,111 @@ pub fn process_command_fire(
             continue;
         }
 
-        let Some(ability) = ability_for(unit.0) else {
-            continue;
-        };
-        // Upstream's shell detonates through its
-        // `explosiongenerator=custom:…`; replay that CEG so the cast
-        // lands as fire-and-spread, not a silent debuff. Drained by
-        // `spawn_pending_explosions` in the same tick chain.
-        if let Some(ceg) = ability.explosion_ceg {
-            let def = weapons.get(ability.weapon.weapon());
-            pending_explosions.events.push(ExplosionEvent {
-                pos: event.target,
-                up: Vec3::Y,
-                rgb: faction.rgb_f32(),
-                radius: ability.weapon.params().radius,
-                ceg: Some(ceg),
-                damage: def.map_or(0.0, |def| def.damage.default),
+        if unit.0 == UnitKind::Obelisk {
+            // obelisk.bos `AimWeapon1`: the four segments slide out 8
+            // elmos at 8 elmos/s (a second) before the shell may leave;
+            // [`tick_infection_casts`] fires it. Another cast meanwhile
+            // re-aims.
+            commands.entity(event.attacker).insert(InfectionCast {
+                target: event.target,
+                left: INFECTION_AIM_SECS,
             });
-            // The blast is a `CGameHelper::Explosion` of the ability weapon.
-            if let (Some(sounds), Some(def)) = (sounds.as_deref_mut(), def) {
-                sounds.explosion(def, event.target);
-            }
         }
-        commands.spawn(AreaDenialZone::new(
-            ability.weapon,
-            event.target,
-            Some(event.attacker),
-            team.0,
-            *faction,
-        ));
-        commands.entity(event.attacker).insert(CommandFireCooldown {
-            remaining: ability.cooldown,
-        });
+    }
+}
+
+/// An Obelisk aiming its Infection shell at `target` (`AimWeapon1`),
+/// until `left` seconds have run.
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+#[component(storage = "SparseSet")]
+pub struct InfectionCast {
+    pub target: Vec3,
+    pub left: f32,
+}
+
+/// obelisk.bos `AimWeapon1`: `move segf to z-axis [8] speed [8]` and
+/// `wait-for-move`: 8 elmos at 8 elmos/s.
+const INFECTION_AIM_SECS: f32 = 1.0;
+
+/// Fire the Obelisk's Infection once its aim is done: a high-arc
+/// ballistic shell (`ballistic=1`, `weaponvelocity=800`, the unit's
+/// `highTrajectory=1`) whose explosion deals 200 to units and 1500 to
+/// buildings within 350 elmos, allies included, infects, and only then
+/// starts the gas ([`ImpactEffect::DenialZone`]). The 40 s reload
+/// (`FireWeapon1`'s `sleep 40000`) starts at the shot.
+///
+/// [`ImpactEffect::DenialZone`]: crate::units::weapon_fx::ImpactEffect::DenialZone
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub fn tick_infection_casts(
+    time: Res<Time>,
+    mut casters: Query<
+        (
+            Entity,
+            &mut InfectionCast,
+            &GlobalTransform,
+            &TeamId,
+            &Faction,
+            &NetId,
+        ),
+        // A paralyzed Obelisk's script doesn't run.
+        (Without<Dying>, Without<crate::units::combat::Stunned>),
+    >,
+    weapons: Res<WeaponRegistry>,
+    pieces: crate::units::combat::PieceLookup,
+    mut pending_attacks: ResMut<crate::units::weapon_fx::PendingAttacks>,
+    mut sounds: Option<ResMut<crate::audio::SoundQueue>>,
+    mut commands: Commands,
+) {
+    let dt = time.delta_secs();
+    let Some(weapon_def) = weapons.get(WeaponKind::Infection) else {
+        return;
+    };
+    let Some(ability) = ability_for(UnitKind::Obelisk) else {
+        return;
+    };
+    for (entity, mut cast, gtf, team, faction, _) in casters.iter_mut().sort::<&NetId>() {
+        if cast.left > dt {
+            cast.left -= dt;
+            continue;
+        }
+        let target = cast.target;
+        let muzzle = pieces.muzzle(entity, gtf);
+        let launch = crate::units::combat::aim::cannon_wanted_dir_arc(
+            target - muzzle.pos,
+            weapon_def.projectile_speed(),
+            crate::units::combat::aim::weapon_gravity(weapon_def, pieces.map_gravity()),
+            true,
+        );
+        pending_attacks
+            .events
+            .push(crate::units::weapon_fx::AttackEvent {
+                attacker_pos: muzzle.pos,
+                target_pos: target,
+                weapon: WeaponKind::Infection,
+                muzzle_ceg: None,
+                delayed_hit: Some(crate::units::weapon_fx::DelayedHitInfo {
+                    target: None,
+                    attacker: entity,
+                    attacker_distance: muzzle.pos.distance(target),
+                    muzzle_dir: muzzle.dir,
+                    launch_dir: Some(launch),
+                    on_impact: Some(crate::units::weapon_fx::ImpactEffect::DenialZone {
+                        weapon: ability.weapon,
+                        owner_team: team.0,
+                        owner_faction: *faction,
+                    }),
+                }),
+                arc_from: None,
+            });
+        if let Some(sounds) = sounds.as_deref_mut() {
+            sounds.weapon_fired(weapon_def, muzzle.pos);
+        }
+        commands
+            .entity(entity)
+            .remove::<InfectionCast>()
+            .insert(CommandFireCooldown {
+                remaining: ability.cooldown,
+            });
     }
 }
 
@@ -872,22 +950,16 @@ pub enum NxCast {
 /// `aimingSpecial` clears and weapon 1 may aim again.
 const NX_WEAPON1_BLOCK: f32 = 61.0 / 30.0;
 
-/// The NX Flag's denial zone (`areadenial.lua`: radius 120, 100 dps,
-/// 60 s, hurts allies too), centred where the shell exploded and
-/// credited to the Pointer that fired it.
-pub fn nx_zone(
+/// The zone `areadenial.lua` starts where a `weapon` shell exploded,
+/// credited to the unit that fired it.
+pub fn denial_zone(
+    weapon: DenialWeapon,
     center: Vec3,
     owner: Entity,
     owner_team: u8,
     owner_faction: Faction,
 ) -> AreaDenialZone {
-    AreaDenialZone::new(
-        DenialWeapon::Nx,
-        center,
-        Some(owner),
-        owner_team,
-        owner_faction,
-    )
+    AreaDenialZone::new(weapon, center, Some(owner), owner_team, owner_faction)
 }
 
 /// Drive pending NX shots. An aiming cast re-stamps the Pointer's
@@ -993,7 +1065,8 @@ pub fn tick_nx_casts(
                     attacker_distance: distance,
                     muzzle_dir: muzzle.dir,
                     launch_dir: None,
-                    on_impact: Some(crate::units::weapon_fx::ImpactEffect::NxZone {
+                    on_impact: Some(crate::units::weapon_fx::ImpactEffect::DenialZone {
+                        weapon: DenialWeapon::Nx,
                         owner_team: team.0,
                         owner_faction: *faction,
                     }),
@@ -1626,11 +1699,6 @@ pub fn tick_sigterm_bombs(
 struct Ability {
     weapon: DenialWeapon,
     cooldown: f32,
-    /// Upstream's `explosiongenerator=custom:…` for the impacting
-    /// shell, replayed through [`PendingExplosions`] on cast. `None`
-    /// where the weapon has no generator (Infection's gas has no CEG
-    /// upstream).
-    explosion_ceg: Option<CegKind>,
 }
 
 fn ability_for(kind: UnitKind) -> Option<Ability> {
@@ -1638,12 +1706,10 @@ fn ability_for(kind: UnitKind) -> Option<Ability> {
         UnitKind::Pointer => Some(Ability {
             weapon: DenialWeapon::Nx,
             cooldown: 30.0,
-            explosion_ceg: Some(CegKind::SystemNx),
         }),
         UnitKind::Obelisk => Some(Ability {
             weapon: DenialWeapon::Infection,
             cooldown: 40.0,
-            explosion_ceg: None,
         }),
         _ => None,
     }
@@ -1754,8 +1820,8 @@ mod tests {
         }
     }
 
-    /// `network_reflectorshield.lua`: `protected[u]` lasts `protectionTime
-    /// * 32` = 640 frames (21.33 s at 30 Hz), and the targets come from
+    /// `network_reflectorshield.lua`: `protected[u]` lasts
+    /// `protectionTime * 32` = 640 frames (21.33 s at 30 Hz), and the targets come from
     /// `GetUnitsInCylinder(x, z, 300)`: height is no part of the test, so
     /// a Flow at its cruise altitude is covered like the ground below it.
     #[test]
@@ -1862,11 +1928,16 @@ mod tests {
         let obelisk = spawn_caster(&mut app, UnitKind::Obelisk, Vec3::ZERO);
         cast(&mut app, obelisk, Vec3::new(2500.0, 0.0, 0.0));
         assert_eq!(zone_count(&mut app), 0);
+        assert!(app.world().get::<InfectionCast>(obelisk).is_none());
         assert!(app.world().get::<CommandFireCooldown>(obelisk).is_none());
 
+        // In range: the shell is aimed first; the gas comes only where
+        // it lands, and the reload starts at the shot.
         cast(&mut app, obelisk, Vec3::new(1500.0, 0.0, 0.0));
-        assert_eq!(zone_count(&mut app), 1);
-        assert!(app.world().get::<CommandFireCooldown>(obelisk).is_some());
+        assert_eq!(zone_count(&mut app), 0);
+        let aim = app.world().get::<InfectionCast>(obelisk).unwrap();
+        assert_eq!(aim.left, INFECTION_AIM_SECS);
+        assert!(app.world().get::<CommandFireCooldown>(obelisk).is_none());
     }
 
     /// A move or stop order ends a pending NX shot like any other order
@@ -2121,7 +2192,7 @@ mod tests {
             sigterm_frame(&mut app);
         }
         let s = app.world().get::<SigTermSignal>(signal).unwrap().clone();
-        assert!(s.pos.y > 40.0, "rising: {}", s.pos);
+        assert!(s.pos.y > 2.0, "rising: {}", s.pos);
         assert!(s.pos.xz().length() < 1.0, "straight up: {}", s.pos);
 
         let mut top = 0.0f32;
@@ -2137,7 +2208,8 @@ mod tests {
             }
         }
         assert!(
-            (top - SIGTERM_CRUISE_HEIGHT).abs() < 40.0,
+            // A bomber's weak thrust (`maxAcc` 0.065) lets it overshoot.
+            (top - SIGTERM_CRUISE_HEIGHT).abs() < 60.0,
             "cruises near {SIGTERM_CRUISE_HEIGHT}: topped out at {top}"
         );
         let (_, release) = released_at.unwrap();
@@ -2163,7 +2235,8 @@ mod tests {
 
     /// A target close beside, ahead of or behind the Terminal — inside
     /// the Signal's turning circle — is bombed after one go-around, not
-    /// circled until the Signal expires.
+    /// circled until the Signal expires (the bomber's 1000-elmo turn
+    /// radius makes that a long loop).
     #[test]
     fn sigterm_comes_around_for_a_close_target() {
         for (target, heading) in [
@@ -2193,7 +2266,7 @@ mod tests {
             while app.world().resource::<DamageQueue>().is_empty() {
                 sigterm_frame(&mut app);
                 frames += 1;
-                assert!(frames < 30 * 30, "{target}: still circling");
+                assert!(frames < 120 * 30, "{target}: still circling");
             }
             let hit = app
                 .world()
@@ -2376,9 +2449,12 @@ mod tests {
                 team,
                 kind,
                 hp_positive: true,
+                health: 1000.0,
+                armored: false,
                 is_flying: false,
                 cloaked: false,
                 detected_by: 0,
+                los_by: u64::MAX,
                 feature: false,
             });
         entity

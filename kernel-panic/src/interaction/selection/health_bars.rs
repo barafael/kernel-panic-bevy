@@ -1,5 +1,5 @@
-//! World-space health bars that appear above selected units and billboard to
-//! face the camera. Bars are child entities of the unit so they follow it
+//! World-space health bars that appear above selected and damaged units
+//! (any team) and billboard to face the camera. Bars are child entities of the unit so they follow it
 //! automatically; we only need to update scale/color each frame.
 
 use bevy::prelude::*;
@@ -22,9 +22,8 @@ impl Plugin for HealthBarsPlugin {
         app.add_systems(
             Update,
             (
-                spawn_health_bars,
-                despawn_health_bars,
-                update_health_bars.after(spawn_health_bars),
+                sync_health_bars,
+                update_health_bars.after(sync_health_bars),
             )
                 .in_set(SelectionSet::Visuals),
         );
@@ -60,21 +59,54 @@ const HEALTH_BAR_HEIGHT: f32 = 2.0;
 /// Vertical offset above the unit's origin.
 const HEALTH_BAR_Y_OFFSET: f32 = 30.0;
 
-/// Spawn health bar child entities on newly-selected units.
-fn spawn_health_bars(
-    new_selections: Query<Entity, Added<Selected>>,
+/// Marks a unit that carries its health bar children.
+#[derive(Component)]
+struct HasHealthBar;
+
+/// Whether a unit shows its bar: selected, or damaged. KP's
+/// `unit_healthbars.lua` draws a bar on every visible unit of every team
+/// once it is hurt (`drawFullHealthBars = false`, `hp < 1`); the bar
+/// children of an unseen unit are hidden with it.
+fn wants_bar(health: &Health, selected: bool) -> bool {
+    selected || health.current < health.max
+}
+
+/// Give units that want a bar their bar children, and take them off the
+/// ones that no longer do (healed and deselected, or dying).
+#[allow(clippy::type_complexity)]
+fn sync_health_bars(
+    units: Query<
+        (Entity, &Health, Has<Selected>, Has<HasHealthBar>, Has<crate::units::combat::Dying>),
+        With<UnitType>,
+    >,
+    children_q: Query<&Children>,
+    bar_q: Query<(), Or<(With<HealthBarBg>, With<HealthBarFg>)>>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     bar_assets: Option<Res<HealthBarAssets>>,
 ) {
-    if new_selections.is_empty() {
-        return;
-    }
-
-    let assets = get_or_init_bar_assets(bar_assets, &mut commands, &mut meshes, &mut materials);
-
-    for entity in &new_selections {
+    let mut assets: Option<HealthBarAssets> = None;
+    for (entity, health, selected, has_bar, dying) in &units {
+        let want = !dying && wants_bar(health, selected);
+        if want == has_bar {
+            continue;
+        }
+        if !want {
+            if let Ok(children) = children_q.get(entity) {
+                for child in children.iter() {
+                    if bar_q.contains(child) {
+                        commands.entity(child).despawn();
+                    }
+                }
+            }
+            commands.entity(entity).remove::<HasHealthBar>();
+            continue;
+        }
+        let assets = assets.get_or_insert_with(|| {
+            get_or_init_bar_assets(bar_assets.as_deref().cloned(), &mut commands, &mut meshes, &mut materials)
+        });
+        commands.entity(entity).insert(HasHealthBar);
         // Background bar (dark).
         // The Plane3d mesh is 1x1 in XY with Z normal. Scale X=width, Y=height.
         commands.entity(entity).with_child((
@@ -104,33 +136,7 @@ fn spawn_health_bars(
     }
 }
 
-/// Remove health bar children from units that are no longer selected.
-///
-/// Walks each deselected unit's `Children` directly (O(children-of-unit))
-/// rather than scanning every health bar in the world per deselection
-/// (the previous O(removed × total-bars) form). At realistic selection
-/// sizes the difference is two orders of magnitude.
-// One-line membership filter; a named alias would be used once.
-#[allow(clippy::type_complexity)]
-fn despawn_health_bars(
-    mut removed_selections: RemovedComponents<Selected>,
-    children_q: Query<&Children>,
-    bar_q: Query<(), Or<(With<HealthBarBg>, With<HealthBarFg>)>>,
-    mut commands: Commands,
-) {
-    for unit in removed_selections.read() {
-        let Ok(children) = children_q.get(unit) else {
-            continue;
-        };
-        for child in children.iter() {
-            if bar_q.contains(child) {
-                commands.entity(child).despawn();
-            }
-        }
-    }
-}
-
-/// Per selected unit: size and colour the foreground bar from its
+/// Per unit with a bar: size and colour the foreground bar from its
 /// health, and billboard both bars toward the camera.
 ///
 /// The bar mesh is a Plane3d in XY with normal along +Z. We rotate so that
@@ -141,7 +147,7 @@ fn despawn_health_bars(
 #[allow(clippy::type_complexity)]
 fn update_health_bars(
     camera_q: Query<&GlobalTransform, With<RtsCamera>>,
-    selected_units: Query<(&Health, &GlobalTransform, &Children), (With<Selected>, With<UnitType>)>,
+    selected_units: Query<(&Health, &GlobalTransform, &Children), (With<HasHealthBar>, With<UnitType>)>,
     mut bars: Query<
         (
             &mut Transform,
@@ -198,13 +204,13 @@ fn palette_index(frac: f32) -> usize {
 }
 
 fn get_or_init_bar_assets(
-    existing: Option<Res<HealthBarAssets>>,
+    existing: Option<HealthBarAssets>,
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
 ) -> HealthBarAssets {
     if let Some(res) = existing {
-        return res.into_inner().clone();
+        return res;
     }
 
     let fg_materials = (0..FG_PALETTE_STEPS)

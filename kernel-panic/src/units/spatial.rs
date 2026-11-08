@@ -20,11 +20,10 @@
 use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
 
-use super::combat::Dying;
+use super::combat::{Armored, Dying};
 use super::components::{Health, TeamId, UnitType};
 use super::content::definitions::UnitKind;
-use super::lifecycle::spawning::Emerging;
-use super::mechanics::cloak::{Cloaked, DetectedBy, hidden_from};
+use super::mechanics::cloak::{Cloaked, SightedBy, team_bit};
 use crate::net::NetId;
 use crate::sim::DetFloat;
 
@@ -64,14 +63,20 @@ pub struct SpatialEntry {
     pub team: u8,
     pub kind: UnitKind,
     pub hp_positive: bool,
+    /// Current health, for the target priority (`GenerateWeaponTargets`
+    /// prefers the wounded).
+    pub health: f32,
+    /// Carries [`Armored`] right now (its damage multiplier applies).
+    pub armored: bool,
     /// Mirrored from the FBI `canFly=1` flag so ground weapons can cheaply
     /// skip flying targets via `NoChaseCategory=VTOL`.
     pub is_flying: bool,
     /// Carries the [`Cloaked`] marker right now (Logic Bomb, buried Worm).
     pub cloaked: bool,
-    /// [`DetectedBy`] team mask — which teams' detectors currently see
-    /// this cloaked unit. Zero (and ignored) for uncloaked units.
+    /// [`SightedBy::radar`]: the owners whose radar covers this unit.
     pub detected_by: u64,
+    /// [`SightedBy::los`]: the owners whose line of sight holds it.
+    pub los_by: u64,
     /// A map feature ([`crate::units::features`]), not a unit: shots and
     /// explosions hit it, but nothing targets it or reacts to it. Its
     /// `team` is [`FEATURE_TEAM`](crate::units::features::FEATURE_TEAM)
@@ -83,11 +88,17 @@ pub struct SpatialEntry {
 
 impl SpatialEntry {
     /// Whether auto-targeting from `team` may pick this entry: never a
-    /// map feature, and a cloaked unit is invisible to teams without a
-    /// detector in range. See
-    /// [`crate::units::mechanics::cloak::hidden_from`].
+    /// map feature, and only a unit `team` has in line of sight or on
+    /// radar (`CWeapon::TestTarget`); a cloaked one is never in an
+    /// enemy's sight, so only radar gives it away.
     pub fn targetable_by(&self, team: u8) -> bool {
-        !self.feature && !hidden_from(self.cloaked, self.detected_by, team)
+        !self.feature && (self.los_by | self.detected_by) & team_bit(team) != 0
+    }
+
+    /// Seen only as a radar blip by `team` (not in its line of sight):
+    /// aimed at a drifting point, and ranked far below what is seen.
+    pub fn radar_only_for(&self, team: u8) -> bool {
+        self.los_by & team_bit(team) == 0
     }
 
     /// World-space centre of the collision sphere (`unit->midPos`).
@@ -194,17 +205,15 @@ pub fn rebuild_spatial_index(
             &TeamId,
             &Transform,
             &Health,
-            Has<Cloaked>,
-            Option<&DetectedBy>,
+            (Has<Cloaked>, Has<Armored>),
+            &SightedBy,
             &NetId,
         ),
-        // `Without<Emerging>` is a deliberate divergence from upstream:
-        // Spring buildees are targetable mid-build; here the build
-        // window doubles as spawn protection, so a unit under
-        // construction stays out of the index (and so out of
-        // auto-targeting, AI target scans, splash sweeps and the
-        // factory's pad-blocked check) until it is finished.
-        (Without<Dying>, Without<Emerging>),
+        // Buildees count: Spring's units under construction are
+        // targetable, hit by splash and area denial, and trigger a
+        // kamikaze (`CUnit::DoDamage` has no `beingBuilt` exemption).
+        // Their health follows their build progress (`buildee_health`).
+        Without<Dying>,
     >,
     features: Query<(
         Entity,
@@ -219,7 +228,7 @@ pub fn rebuild_spatial_index(
     // archetype history, a match or attract demo ago included): every
     // radius query then visits a cell's units in the same order on
     // every peer, and so do the target picks and sweeps built on it.
-    for (entity, unit_type, stats, team, tf, health, cloaked, detected_by, _) in
+    for (entity, unit_type, stats, team, tf, health, (cloaked, armored), sighted, _) in
         units.iter().sort::<&NetId>()
     {
         index.push(SpatialEntry {
@@ -231,9 +240,12 @@ pub fn rebuild_spatial_index(
             team: team.0,
             kind: unit_type.0,
             hp_positive: health.current > 0.0,
+            health: health.current,
+            armored,
             is_flying: stats.can_fly,
             cloaked,
-            detected_by: detected_by.map_or(0, |d| d.0),
+            detected_by: sighted.radar,
+            los_by: sighted.los,
             feature: false,
         });
     }
@@ -248,9 +260,12 @@ pub fn rebuild_spatial_index(
             team: crate::units::features::FEATURE_TEAM,
             kind: UnitKind::BadBlock,
             hp_positive: health.current > 0.0,
+            health: health.current,
+            armored: false,
             is_flying: false,
             cloaked: false,
             detected_by: 0,
+            los_by: u64::MAX,
             feature: true,
         });
     }
@@ -270,9 +285,12 @@ mod tests {
             team: 0,
             kind: UnitKind::Bit,
             hp_positive: true,
+            health: 1000.0,
+            armored: false,
             is_flying: false,
             cloaked: false,
             detected_by: 0,
+            los_by: u64::MAX,
             feature: false,
         }
     }

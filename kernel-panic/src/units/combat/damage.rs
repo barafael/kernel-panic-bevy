@@ -469,6 +469,18 @@ impl DamageResolver<'_, '_> {
                 }
             }
         }
+        // `CUnit::DoDamage`: remember who hurt it last (an enemy unit).
+        if damage > 0.0
+            && let Some(attacker) = hit.attacker
+            && attacker.team != team
+        {
+            self.commands
+                .entity(hit.target)
+                .try_insert(super::engage::LastAttacker {
+                    entity: attacker.entity,
+                    frame: self.tick.frame(),
+                });
+        }
         if damage > 0.0
             && let Ok(mut shield) = self.hits.shield.get_mut(hit.target)
         {
@@ -588,7 +600,19 @@ impl DamageResolver<'_, '_> {
                 h.paralyze_time.map(f32::to_bits),
             )
         });
-        for hit in due {
+        for mut hit in due {
+            // `waitingDamages` keeps the attacker's *id*: a front that
+            // arrives after the attacker was deleted (a Virus's
+            // VirusDeath blast, two frames after it dies) finds no unit,
+            // and `DoDamage` runs with a null attacker — so it infects
+            // nobody.
+            if hit
+                .attacker
+                .as_ref()
+                .is_some_and(|a| self.ids.get(a.entity).is_err())
+            {
+                hit.attacker = None;
+            }
             self.deliver(hit);
         }
     }
@@ -1279,9 +1303,12 @@ mod tests {
                 team,
                 kind,
                 hp_positive: true,
+                health: 1000.0,
+                armored: false,
                 is_flying: false,
                 cloaked: false,
                 detected_by: 0,
+                los_by: u64::MAX,
                 feature: false,
             });
         entity

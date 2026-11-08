@@ -63,7 +63,6 @@ pub const CATEGORIES: &[(&str, &str)] = &[
     ("ceg_ground_flash", "::CegGroundFlash"),
     ("ceg_spike", "::CegSpike"),
     ("ceg_delayed", "::CegDelayedSpawn"),
-    ("death_particle", "::DeathParticle"),
     ("debris", "::Debris"),
     ("shard", "::Shard"),
     ("piece", "::PieceIndex"),

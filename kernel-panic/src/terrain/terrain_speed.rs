@@ -16,6 +16,7 @@
 //! "tank" / "hover" / "ship" / "boat" in the name), so the kbot speeds
 //! are the ones that apply.
 
+use crate::sim::DetFloat;
 use bevy::math::Vec2;
 use spring_map::map_types::{SQUARE_SIZE, TerrainTypes};
 use spring_pathfinding::SpeedMap;
@@ -27,6 +28,10 @@ pub struct TerrainSpeedMap {
     width: usize,
     height: usize,
     speeds: Vec<f32>,
+    /// Water's price per heightmap square (`GroundMoveMath.cpp:25-26`,
+    /// `:49-50`); empty on maps without water damage.
+    water: Vec<f32>,
+    water_width: usize,
 }
 
 impl TerrainSpeedMap {
@@ -40,24 +45,80 @@ impl TerrainSpeedMap {
             width,
             height,
             speeds: typemap.iter().map(|&t| types.get(t).kbot).collect(),
+            ..Self::default()
         }
+    }
+
+    /// Add what the map's water costs a ground unit. A square whose
+    /// highest corner is below sea level takes the water-damage price
+    /// `1 / (1 + 0.1 · damage)` (`damage` per slow update, as
+    /// [`crate::map_events::WaterDamage`] holds it —
+    /// `MoveDefHandler.cpp:158-160`) and the depth price
+    /// `1 / (1 + 0.1 · depth)` (`GetDepthMod`, the KBot's `linearCoeff`
+    /// 0.1), for pathing and driving alike.
+    pub fn with_water(
+        mut self,
+        heights: &[f32],
+        vertices_wide: usize,
+        damage_per_slow_update: f32,
+    ) -> Self {
+        if vertices_wide < 2 || heights.len() < vertices_wide * 2 {
+            return self;
+        }
+        let rows = heights.len() / vertices_wide;
+        let (squares_wide, squares_high) = (vertices_wide - 1, rows - 1);
+        let damage_cost = 1.0 / (1.0 + 0.1 * damage_per_slow_update);
+        let mut water = vec![1.0; squares_wide * squares_high];
+        let mut any = false;
+        for z in 0..squares_high {
+            for x in 0..squares_wide {
+                let corner = |dx: usize, dz: usize| heights[(z + dz) * vertices_wide + x + dx];
+                let highest = corner(0, 0)
+                    .det_max(corner(1, 0))
+                    .det_max(corner(0, 1))
+                    .det_max(corner(1, 1));
+                if highest < 0.0 {
+                    let depth_mod = 1.0 / (1.0 + 0.1 * -highest).det_max(0.01);
+                    water[z * squares_wide + x] = damage_cost * depth_mod;
+                    any = true;
+                }
+            }
+        }
+        if any {
+            self.water = water;
+            self.water_width = squares_wide;
+        }
+        self
     }
 
     /// Does any square run at other than full speed?
     pub fn is_neutral(&self) -> bool {
-        self.speeds.is_empty()
+        self.speeds.is_empty() && self.water.is_empty()
     }
 
     /// The multiplier of heightmap square `(x, z)`.
     pub fn at_square(&self, x: u32, z: u32) -> f32 {
-        if self.speeds.is_empty() {
-            return 1.0;
-        }
-        let (cx, cz) = ((x / 2) as usize, (z / 2) as usize);
-        if cx >= self.width || cz >= self.height {
-            return 1.0;
-        }
-        self.speeds[cz * self.width + cx]
+        let terrain = if self.speeds.is_empty() {
+            1.0
+        } else {
+            let (cx, cz) = ((x / 2) as usize, (z / 2) as usize);
+            if cx >= self.width || cz >= self.height {
+                1.0
+            } else {
+                self.speeds[cz * self.width + cx]
+            }
+        };
+        let water = if self.water.is_empty() {
+            1.0
+        } else {
+            let (x, z) = (x as usize, z as usize);
+            if x >= self.water_width {
+                1.0
+            } else {
+                self.water.get(z * self.water_width + x).copied().unwrap_or(1.0)
+            }
+        };
+        terrain * water
     }
 
     /// The multiplier under world position `pos` (x, z).

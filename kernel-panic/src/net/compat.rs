@@ -102,12 +102,28 @@ use super::state::Fnv;
 /// cylinder; a Flow's starburst range counts `heightmod` twice
 /// (`CStarburstLauncher::GetRange2D`); and `Sign(0)` is -1 as in the
 /// engine (exact ties in the push, avoidance and strafe signs).
+/// 22 (2026-11-08, parity review, second pass): line of sight and radar
+/// are rules — weapons and attack orders only take targets their team has
+/// in sight or on radar (radar-only ones aimed at a drifting blip, ranked
+/// below seen ones), only Assemblers, Trojans and Gateways run radar, and
+/// an attack order on a mobile target ends 60 frames after it is lost; a
+/// unit under construction is in the spatial index and its health follows
+/// its build progress; homebases start on Repeat (the AI turns it off),
+/// AI teams run while they own any factory; Worms and Logic Bombs cloak
+/// only once built (a Worm 193 frames after); explosion fronts reaching a
+/// victim after the attacker is gone have no attacker; an NX shell whose
+/// Pointer died leaves no zone; infected Packets entering a Port and
+/// morphing Bugs/Exploits release their Virus; the kamikaze scan runs on
+/// the unit's slow update; the SIGTERM Signal flies as a bomber (thrust
+/// 0.065, turn radius 1000) and drops within 12 frames of the target; the
+/// Obelisk's Infection is a high-arc shell with a 200/1500 impact blast
+/// that starts the gas where it lands.
 ///
 /// [`SimCommand::Dropped`]: crate::net::SimCommand::Dropped
 /// [`SimCommand::Returned`]: crate::net::SimCommand::Returned
 /// [`SimCommand::InternalSpeed`]: crate::net::SimCommand::InternalSpeed
 /// [`MatchRules`]: crate::net::MatchRules
-pub const SIM_VERSION: u32 = 21;
+pub const SIM_VERSION: u32 = 22;
 
 /// The map-independent half of [`Compat`]: what a peer announces when
 /// it joins a room, before any map is chosen.

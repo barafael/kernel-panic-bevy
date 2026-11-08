@@ -44,6 +44,7 @@ impl Plugin for AbilityHotkeyPlugin {
                     // deselect everything, a guard click select the guarded
                     // unit).
                     (
+                        disarm_when_shift_released,
                         trigger_bombard_click,
                         trigger_ability_click,
                         trigger_patrol_click,
@@ -81,6 +82,10 @@ impl Plugin for AbilityHotkeyPlugin {
 #[derive(Resource, Default)]
 pub struct OrderCursorModes {
     pub mode: Option<Mode>,
+    /// The mode was kept armed by a Shift-committed click: it ends when
+    /// Shift is released (`CGuiHandler`'s `needShift`), so the next
+    /// click selects again instead of issuing another unqueued order.
+    needs_shift: bool,
 }
 
 impl OrderCursorModes {
@@ -95,18 +100,30 @@ impl OrderCursorModes {
     /// Arm exactly one mode, replacing any other (they share the cursor).
     pub fn arm(&mut self, mode: Mode) {
         self.mode = Some(mode);
+        self.needs_shift = false;
     }
 
     /// Disarm every mode.
     pub fn clear(&mut self) {
         self.mode = None;
+        self.needs_shift = false;
     }
 
-    /// After a committing click: Shift keeps the mode armed.
+    /// After a committing click: Shift keeps the mode armed, until it is
+    /// released.
     fn committed(&mut self, keys: &ButtonInput<KeyCode>) {
-        if !shift_held(keys) {
+        if shift_held(keys) {
+            self.needs_shift = true;
+        } else {
             self.clear();
         }
+    }
+}
+
+/// A mode a Shift-click kept armed ends with the Shift key.
+fn disarm_when_shift_released(mut modes: ResMut<OrderCursorModes>, keys: Res<ButtonInput<KeyCode>>) {
+    if modes.needs_shift && !shift_held(&keys) {
+        modes.clear();
     }
 }
 
@@ -989,5 +1006,31 @@ mod tests {
         let chained = [QueuedCommand::Patrol(goal), QueuedCommand::Patrol(unit)];
         let more = patrol_commands(true, &chained, Some(goal), unit, click);
         assert_eq!(more.iter().map(patrol).collect::<Vec<_>>(), [click]);
+    }
+
+    /// A Shift-click keeps its mode armed only while Shift is held.
+    #[test]
+    fn shift_committed_mode_ends_with_shift() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        let mut keys = ButtonInput::<KeyCode>::default();
+        keys.press(KeyCode::ShiftLeft);
+        let mut modes = OrderCursorModes::default();
+        modes.arm(Mode::AttackMove);
+        modes.committed(&keys);
+        assert!(modes.is(Mode::AttackMove));
+        world.insert_resource(modes);
+        world.insert_resource(keys);
+        world.run_system_once(disarm_when_shift_released).unwrap();
+        assert!(world.resource::<OrderCursorModes>().is(Mode::AttackMove));
+        world
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .release(KeyCode::ShiftLeft);
+        world.run_system_once(disarm_when_shift_released).unwrap();
+        assert!(!world.resource::<OrderCursorModes>().any_active());
+        // A plain armed mode (no Shift commit) is left alone.
+        world.resource_mut::<OrderCursorModes>().arm(Mode::Patrol);
+        world.run_system_once(disarm_when_shift_released).unwrap();
+        assert!(world.resource::<OrderCursorModes>().is(Mode::Patrol));
     }
 }

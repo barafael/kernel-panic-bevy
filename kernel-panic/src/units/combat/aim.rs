@@ -132,12 +132,19 @@ pub fn weapon_gravity(weapon: &spring_tdf::WeaponDef, map_gravity: f32) -> f32 {
     }
 }
 
-/// `CCannon::CalcWantedDir` (low trajectory — no Kernel Panic weapon sets
-/// `highTrajectory`): the unit launch direction that puts a shell of
-/// `speed` elmos/frame under `gravity` (elmos/frame², negative) onto a
-/// point `target_vec` away. Out of ballistic reach the engine leaves the
-/// direction level toward the target; a zero vector fires straight down.
+/// `CCannon::CalcWantedDir` (low trajectory): the unit launch direction
+/// that puts a shell of `speed` elmos/frame under `gravity`
+/// (elmos/frame², negative) onto a point `target_vec` away. Out of
+/// ballistic reach the engine leaves the direction level toward the
+/// target; a zero vector fires straight down.
 pub fn cannon_wanted_dir(target_vec: Vec3, speed: f32, gravity: f32) -> Vec3 {
+    cannon_wanted_dir_arc(target_vec, speed, gravity, false)
+}
+
+/// [`cannon_wanted_dir`] for a unit with `highTrajectory=1` (the
+/// Obelisk): the steep of the two arcs (`-sqrt(root1)` in
+/// `CalcWantedDir`), a lob that takes seconds to land.
+pub fn cannon_wanted_dir_arc(target_vec: Vec3, speed: f32, gravity: f32, high: bool) -> Vec3 {
     let dsq = target_vec.length_squared();
     let dfsq = target_vec.xz().length_squared();
     let (g, v, dy) = (gravity, speed, target_vec.y);
@@ -145,12 +152,12 @@ pub fn cannon_wanted_dir(target_vec: Vec3, speed: f32, gravity: f32) -> Vec3 {
 
     let (mut vxz, mut vy) = (0.0f32, 0.0f32);
     if dsq == 0.0 {
-        vy = -v;
+        vy = if high { v } else { -v };
     } else if dsq < 1e12 && dy.abs() < 1e6 {
         let vsq = v * v;
         let root1 = vsq * vsq + 2.0 * vsq * g * dy - g * g * dfsq;
         if root1 >= 0.0 {
-            let root2 = 2.0 * dfsq * dsq * (vsq + g * dy + root1.sqrt());
+            let root2 = 2.0 * dfsq * dsq * (vsq + g * dy + if high { -root1.sqrt() } else { root1.sqrt() });
             if root2 >= 0.0 {
                 vxz = root2.sqrt() / (2.0 * dsq);
                 vy = if dxz == 0.0 || vxz == 0.0 {

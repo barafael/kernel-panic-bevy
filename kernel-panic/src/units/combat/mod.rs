@@ -26,7 +26,7 @@ use super::content::unit_registry::UnitRegistry;
 use super::content::weapons::{WeaponKind, WeaponRegistry};
 use super::lifecycle::bookkeeping::NoAutoTarget;
 use super::lifecycle::script_triggers::JustFired;
-use super::mechanics::cloak::{Cloaked, DetectedBy};
+use super::mechanics::cloak::{Cloaked, SightedBy, radar_blip, team_bit};
 use super::mechanics::worm::{AutoHold, WormSplash, queue_wormsplash};
 use super::spatial::SpatialIndex;
 use super::weapon_fx::{
@@ -40,6 +40,7 @@ use crate::units::teams::Alliances;
 pub(crate) mod aim;
 mod collision_volume;
 mod damage;
+pub mod engage;
 mod lifecycle;
 
 pub use collision_volume::CollisionVolume;
@@ -49,11 +50,9 @@ pub use aim::{
     DeployState, Deployable, aim_weapons_system, drive_aim_script, sync_byte_fold_state,
     sync_deploy_state,
 };
-#[cfg(test)]
-pub use damage::Infected;
 pub use damage::{
-    Armored, Attacker, BurstFire, BurstRng, DamageQueue, DelayedDamage, Hit, PendingDamage,
-    VirusSpawnQueue, apply_damage, apply_death_blasts, tick_burst_fire, tick_infections,
+    Armored, Attacker, BurstFire, BurstRng, DamageQueue, DelayedDamage, Hit, Infected,
+    PendingDamage, VirusSpawn, VirusSpawnQueue, apply_damage, apply_death_blasts, tick_burst_fire, tick_infections,
     update_armored,
 };
 pub use lifecycle::{
@@ -85,21 +84,20 @@ pub struct AttackTargetOrder {
     pub target: Entity,
 }
 
-/// `CCommandAI::targetLostTimer`: an armed unit that cannot move keeps
-/// an attack order on a target out of its reach for
-/// [`TARGET_LOST_FRAMES`] before finishing it (`TARGET_LOST_TIMER` = 4
-/// slow updates), so a target that steps out for a moment — or a unit
-/// whose own pose is not propagated on its spawn tick, as an Exploit
-/// deployed by a Bombard — does not lose the order at once.
+/// `CCommandAI::targetLostTimer`: an attack order on a *mobile* target
+/// ends [`TARGET_LOST_FRAMES`] after the target left the attacker's line
+/// of sight and radar (`UpdateTargetLostTimer`, `CommandAI.cpp:1469-1485`);
+/// it restarts whenever the target is seen again. Orders on immobile
+/// targets never time out.
 #[derive(Component, Clone, Copy, Debug)]
 #[component(storage = "SparseSet")]
 pub struct TargetLost {
-    /// The sim frame the target went out of reach.
+    /// The sim frame the target was last seen.
     pub since: u64,
 }
 
-/// Four slow updates of 16 frames.
-pub const TARGET_LOST_FRAMES: u64 = 64;
+/// `TARGET_LOST_TIMER` = 4 slow updates of 15 frames.
+pub const TARGET_LOST_FRAMES: u64 = 4 * crate::sim::SLOW_UPDATE_RATE as u64;
 
 /// Manual target designation (`T` set-target / `X` unset, Spring's
 /// `CMD_SET_TARGET` / `CMD_UNSET_TARGET`).
@@ -126,20 +124,67 @@ fn line_of_fire_clear(hm: &Heightmap, from: Vec3, to: Vec3, aoe_radius: f32) -> 
 /// from `from` to `to` through the terrain. Spring decides this by
 /// weapon type and `avoidGround` (default on, never off in Kernel
 /// Panic), not by the TDF's `lineofsight`, which only picks the type.
-/// Arcing weapons (cannons, trajectory missiles, bombs, starbursts)
-/// aren't tested here.
+/// Arcing weapons are tested by their own rules: a cannon's lob against
+/// the terrain ([`cannon_trajectory_clear`]); trajectory missiles, bombs
+/// and starbursts aren't tested.
 pub(crate) fn ground_line_of_fire(
     weapon_def: &spring_tdf::WeaponDef,
     hm: Option<&Heightmap>,
     from: Vec3,
     to: Vec3,
+    map_gravity: f32,
 ) -> bool {
     match hm {
         Some(hm) if straight_line_of_fire(weapon_def) => {
             line_of_fire_clear(hm, from, to, weapon_def.area_of_effect * 0.5)
         }
+        Some(hm) if is_ballistic_cannon(weapon_def) => {
+            cannon_trajectory_clear(hm, weapon_def, from, to, map_gravity)
+        }
         _ => true,
     }
+}
+
+/// A `Cannon` that flies a ballistic shell (not a hitscan stand-in).
+fn is_ballistic_cannon(weapon_def: &spring_tdf::WeaponDef) -> bool {
+    weapon_def.category() == spring_tdf::WeaponCategory::Cannon && weapon_def.weapon_velocity > 0.0
+}
+
+/// `CCannon::HaveFreeLineOfFire`'s ground half: the shell's parabola from
+/// `from` (the low-arc solution to `to`, [`aim::cannon_wanted_dir`]) must
+/// stay above the terrain out to 15/16 of the way
+/// (`CGround::TrajectoryGroundCol`, which ignores the last sixteenth).
+/// A target behind a ridge the shell cannot clear is not shot at.
+fn cannon_trajectory_clear(
+    hm: &Heightmap,
+    weapon_def: &spring_tdf::WeaponDef,
+    from: Vec3,
+    to: Vec3,
+    map_gravity: f32,
+) -> bool {
+    let target_vec = to - from;
+    let flat = target_vec.xz();
+    let dist = flat.length();
+    if dist < 1.0 {
+        return true;
+    }
+    let speed = weapon_def.projectile_speed();
+    let gravity = aim::weapon_gravity(weapon_def, map_gravity);
+    let dir = aim::cannon_wanted_dir(target_vec, speed, gravity);
+    if dir == Vec3::ZERO {
+        return false;
+    }
+    let speed_xz = (speed * dir.xz().length()).det_max(0.001);
+    let lin = (speed * dir.y + gravity * 0.5) / speed_xz;
+    let qdr = (gravity * 0.5) / (speed_xz * speed_xz);
+    let check = (0.9375 * dist).det_max(10.0).det_min(dist);
+    let heading = flat / dist;
+    let steps = ((check / 8.0).ceil() as i32).max(1);
+    (1..=steps).all(|i| {
+        let x = check * i as f32 / steps as f32;
+        let p = from.xz() + heading * x;
+        from.y + lin * x + qdr * x * x >= hm.sample(p.x, p.y)
+    })
 }
 
 /// Whether `weapon_def` takes the base `CWeapon::HaveFreeLineOfFire`
@@ -261,12 +306,19 @@ pub struct TargetCache {
     pub rescan_frame: u64,
 }
 
-/// Auto-target pick order (`CGameHelper::GenerateWeaponTargets`): a
-/// `BadTargetCategory1` candidate ranks behind every ordinary one; ties
-/// break on distance (negated for `proximityPriority < 0` weapons, which
-/// prefer far targets).
+/// Auto-target pick order: `CGameHelper::GenerateWeaponTargets`' priority,
+/// lower first. A candidate's `priority` is
+///
+/// `(dist · proximityPriority + 0.4 · range + 100) · (secDamage + health)
+///  / (damage vs its armour · ARMORED multiple · power)`
+///
+/// ×10 for a radar-only contact (whose health is not known: `+ 10000`),
+/// ×100 for a `BadTargetCategory1` candidate, ×0.5 for the unit that
+/// last hurt the shooter. Ties break on distance.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct TargetRank {
+    priority: f32,
+    /// A `BadTargetCategory1` pick: rescanned at the next slow update.
     bad: bool,
     dist_sq: f32,
 }
@@ -281,8 +333,8 @@ impl PartialOrd for TargetRank {
 
 impl Ord for TargetRank {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.bad
-            .cmp(&other.bad)
+        self.priority
+            .total_cmp(&other.priority)
             .then_with(|| self.dist_sq.total_cmp(&other.dist_sq))
     }
 }
@@ -298,23 +350,33 @@ pub struct TargetCachePick<'w, 's> {
         (&'static GlobalTransform, &'static UnitStats),
         (With<UnitType>, Without<Dying>),
     >,
-    /// Detection mask of every currently cloaked unit — a cached or
-    /// designated target that burrows out of detector range is dropped.
-    pub cloaked: Query<'w, 's, &'static DetectedBy, With<Cloaked>>,
+    /// Who has each unit in sight or on radar — a cached or designated
+    /// target that leaves both (burrows out of radar range, walks into
+    /// the fog) is dropped.
+    pub sighted: Query<'w, 's, &'static SightedBy>,
 }
 
 impl TargetCachePick<'_, '_> {
     /// Aim position of `target` — its model midpoint, `unit->aimPos`
     /// (`SolidObject::UpdateMidAndAimPos`) — if it is alive and `team`
-    /// can currently see it (not an undetected cloaked unit).
-    fn visible_pos(&self, target: Entity, team: u8) -> Option<Vec3> {
-        if self.cloaked.get(target).is_ok_and(|d| !d.contains(team)) {
+    /// has it in sight or on radar (`CWeapon::TestTarget`); a radar-only
+    /// contact is aimed at its drifting blip, not where it is.
+    fn visible_pos(&self, target: Entity, team: u8, frame: u64) -> Option<Vec3> {
+        let bit = team_bit(team);
+        let sighted = self.sighted.get(target).ok();
+        if sighted.is_some_and(|s| (s.los | s.radar) & bit == 0) {
             return None;
         }
-        self.alive
+        let pos = self
+            .alive
             .get(target)
             .ok()
-            .map(|(gtf, stats)| stats.mid_pos(gtf))
+            .map(|(gtf, stats)| stats.mid_pos(gtf))?;
+        Some(if sighted.is_some_and(|s| s.los & bit == 0) {
+            radar_blip(pos, frame)
+        } else {
+            pos
+        })
     }
 }
 
@@ -852,6 +914,7 @@ pub fn combat_system(
                 Has<super::mechanics::command_fire::NxCast>,
                 Has<DebugBlasted>,
                 &NetId,
+                Option<&engage::LastAttacker>,
             ),
         ),
         (
@@ -910,7 +973,7 @@ pub fn combat_system(
         worm_splash,
         mut aim_slot,
         mut cache_slot,
-        (nx_cast, debug_blasted, net_id),
+        (nx_cast, debug_blasted, net_id, last_hit),
     ) in attackers.iter_mut().sort::<&NetId>()
     {
         // pointer.bos `AimWeapon1`: `if (aimingSpecial) return 0` — a
@@ -995,12 +1058,10 @@ pub fn combat_system(
         let in_range =
             |pos: Vec3| aim::in_weapon_range(weapon_def, aim_from, pos, false, map_gravity);
 
-        // Why: `proximity_priority < 0` is upstream's anti-swarm
-        // marker — Exploit's BugCannon prefers far targets.
-        let prefer_distant = weapon_def.proximity_priority < 0.0;
         // Straight-firing weapons can't shoot through terrain; arcs
         // clear ridges (`ground_line_of_fire`).
-        let enforce_los = straight_line_of_fire(weapon_def) && heightmap.is_some();
+        let enforce_los = (straight_line_of_fire(weapon_def) || is_ballistic_cannon(weapon_def))
+            && heightmap.is_some();
         // `avoidfriendly=1` (BugShot, DOS_Beam): no shot while an ally
         // stands in the line of fire — `TryTarget` → `HaveFreeLineOfFire`
         // runs for every candidate `AutoTarget` weighs, every user
@@ -1022,14 +1083,25 @@ pub fn combat_system(
         // user and kept target and before every shot, not only for fresh
         // candidates.
         let try_lof = |to: Vec3| {
-            ground_line_of_fire(weapon_def, heightmap.as_deref(), aim_from, to) && lof_clear(to)
+            ground_line_of_fire(weapon_def, heightmap.as_deref(), aim_from, to, map_gravity)
+                && lof_clear(to)
         };
         // `(entity, aim position, rank, source)`: lower rank wins.
         let mut best: Option<(Entity, Vec3, TargetRank, TargetSource)> = None;
         let rank_of = |dist_sq: f32| TargetRank {
+            priority: 0.0,
             bad: false,
             dist_sq,
         };
+        // `lastAttacker`, as the vendored engine reads it: the unit that
+        // hit the shooter, once that was 200 or more frames ago.
+        let last_attacker = last_hit
+            .filter(|l| l.frame + 200 <= frame)
+            .map(|l| l.entity);
+        // `secDamage`: the weapon's damage per second.
+        let sec_damage =
+            weapon_def.damage.default * weapon_def.burst.det_max(1.0) / weapon_def.reload_time.det_max(0.01);
+        let weapon_range = weapon_def.effective_range();
         // A user target in range whose line of fire is blocked by an
         // ally: keep tracking it, and — as `AllowWeaponAutoTarget` lets
         // a weapon whose user target fails `TryTarget` do — shoot
@@ -1042,7 +1114,7 @@ pub fn combat_system(
         // undetected cloak → drop the mark (upstream can't target what
         // it can't see).
         if let Ok(forced) = explicit.forced.get(entity) {
-            match target_pick.visible_pos(forced.0, attacker_team.0) {
+            match target_pick.visible_pos(forced.0, attacker_team.0, frame) {
                 Some(t_pos) if in_range(t_pos) => {
                     if try_lof(t_pos) {
                         let rank = rank_of(attacker_pos.distance_squared(t_pos));
@@ -1072,7 +1144,7 @@ pub fn combat_system(
         // acquisition below may engage passers-by.
         if best.is_none()
             && let Ok(order) = explicit.ordered.get(entity)
-            && let Some(t_pos) = target_pick.visible_pos(order.target, attacker_team.0)
+            && let Some(t_pos) = target_pick.visible_pos(order.target, attacker_team.0, frame)
             && in_range(t_pos)
         {
             if try_lof(t_pos) {
@@ -1099,7 +1171,7 @@ pub fn combat_system(
                     // A kept target that has gone behind terrain (or an
                     // ally) fails `TryTarget` and is replaced by a scan now
                     // (`AllowWeaponAutoTarget`).
-                    if let Some(pos) = target_pick.visible_pos(target, attacker_team.0)
+                    if let Some(pos) = target_pick.visible_pos(target, attacker_team.0, frame)
                         && in_range(pos)
                         && try_lof(pos)
                     {
@@ -1155,7 +1227,13 @@ pub fn combat_system(
                 }
                 // Ranged and aimed at the candidate's midpoint (engine
                 // `GenerateWeaponTargets` tests range to the aimPos).
-                let aim_pos = candidate.mid_pos();
+                // A radar-only contact is aimed at its blip.
+                let radar_only = candidate.radar_only_for(attacker_team.0);
+                let aim_pos = if radar_only {
+                    radar_blip(candidate.mid_pos(), frame)
+                } else {
+                    candidate.mid_pos()
+                };
                 if !in_range(aim_pos) {
                     return;
                 }
@@ -1163,9 +1241,39 @@ pub fn combat_system(
                 // `BadTargetCategory1` (Bits/Bytes/Packets vs FACTORY,
                 // artillery vs FAST spam) ranks behind every good target
                 // but is still shot when nothing better is in range.
+                let dist2d = dist_sq.sqrt();
+                let range_mul = dist2d * weapon_def.proximity_priority + weapon_range * 0.4 + 100.0;
+                let armor_mul = if candidate.armored {
+                    unit_registry.armored_multiple(candidate.kind)
+                } else {
+                    1.0
+                };
+                let damage_mul = (weapon_def
+                    .damage
+                    .for_type(candidate.kind.armor_class().key())
+                    * armor_mul)
+                    .det_max(0.0001);
+                let known_health = if radar_only {
+                    10_000.0
+                } else {
+                    candidate.health
+                };
+                let mut priority = range_mul * (sec_damage + known_health)
+                    / (damage_mul * unit_registry.power(candidate.kind));
+                if radar_only {
+                    priority *= 10.0;
+                }
+                let bad = unit_registry.bad_target(unit_type.0, candidate.kind);
+                if bad {
+                    priority *= 100.0;
+                }
+                if last_attacker == Some(candidate.entity) {
+                    priority *= 0.5;
+                }
                 let rank = TargetRank {
-                    bad: unit_registry.bad_target(unit_type.0, candidate.kind),
-                    dist_sq: if prefer_distant { -dist_sq } else { dist_sq },
+                    priority,
+                    bad,
+                    dist_sq,
                 };
                 if defer_lof {
                     los_candidates.push((rank, candidate.entity, aim_pos));
@@ -1179,12 +1287,15 @@ pub fn combat_system(
                 // Stable sort: equal ranks keep the scan order, so the
                 // same unit wins as the strict `<` pick.
                 los_candidates.sort_by_key(|a| a.0);
-                let aoe_radius = weapon_def.area_of_effect * 0.5;
-                let ground_clear = |aim_pos: Vec3| match heightmap.as_deref() {
-                    Some(hm) if enforce_los => {
-                        line_of_fire_clear(hm, aim_from, aim_pos, aoe_radius)
-                    }
-                    _ => true,
+                let ground_clear = |aim_pos: Vec3| {
+                    !enforce_los
+                        || ground_line_of_fire(
+                            weapon_def,
+                            heightmap.as_deref(),
+                            aim_from,
+                            aim_pos,
+                            map_gravity,
+                        )
                 };
                 best = los_candidates
                     .iter()
@@ -1597,9 +1708,16 @@ pub fn attack_ground_system(
 
         // In range but the terrain, a feature or (`avoidfriendly`) an
         // ally is in the way: close in, as `CMobileCAI` keeps moving
-        // while `TryTarget` fails (an arcing weapon is never blocked
-        // here). In range with a clear line: stand and fire.
-        if !ground_line_of_fire(weapon_def, pieces.heightmap.as_deref(), aim_from, order.pos)
+        // while `TryTarget` fails (a cannon's lob is tested against the
+        // terrain it must clear, other arcs are never blocked here). In
+        // range with a clear line: stand and fire.
+        if !ground_line_of_fire(
+            weapon_def,
+            pieces.heightmap.as_deref(),
+            aim_from,
+            order.pos,
+            pieces.map_gravity(),
+        )
             || !free_line_of_fire(
                 weapon_def, &spatial, &alliances, entity, team.0, aim_from, order.pos,
             )
@@ -1762,6 +1880,7 @@ pub fn attack_target_system(
         Without<Dying>,
     >,
     target_q: Query<(&GlobalTransform, Option<&UnitStats>), Without<Dying>>,
+    sighted_q: Query<&SightedBy>,
     move_path_q: Query<&crate::interaction::movement::MovePath>,
     gravity: Option<Res<crate::sim::MapGravity>>,
     heightmap: Option<Res<Heightmap>>,
@@ -1814,13 +1933,52 @@ pub fn attack_target_system(
             }
             continue;
         };
-        let target_pos = target_gtf.translation();
+        // What the attacker's team knows of the target: in sight, on
+        // radar, or neither. A mobile target out of both ends the order
+        // after `TARGET_LOST_FRAMES`; until then, and while it is only a
+        // radar blip, the chase heads for the blip (`GetErrorPos`).
+        let bit = team_bit(team.0);
+        let sighted = sighted_q.get(order.target).ok();
+        let in_los = sighted.is_none_or(|s| s.los & bit != 0);
+        let unseen = sighted.is_some_and(|s| (s.los | s.radar) & bit == 0);
+        let target_mobile = target_stats.is_some_and(|s| s.speed > 0.0);
+        if unseen && target_mobile {
+            match lost {
+                Some(l) if tick.0.saturating_sub(l.since) >= TARGET_LOST_FRAMES => {
+                    let mut ec = commands.entity(entity);
+                    ec.remove::<(AttackTargetOrder, TargetLost)>();
+                    if has_move {
+                        ec.remove::<crate::interaction::movement::MoveTarget>();
+                    }
+                    if move_path_q.contains(entity) {
+                        ec.remove::<crate::interaction::movement::MovePath>();
+                    }
+                    continue;
+                }
+                Some(_) => {}
+                None => {
+                    commands.entity(entity).insert(TargetLost { since: tick.0 });
+                }
+            }
+        } else if lost.is_some() {
+            commands.entity(entity).remove::<TargetLost>();
+        }
+        let blip = !in_los && target_mobile;
+        let target_pos = if blip {
+            radar_blip(target_gtf.translation(), tick.0)
+        } else {
+            target_gtf.translation()
+        };
         // The same range test `combat_system` fires on — weapon aim point
         // to the target's aimPos — so the chase stops exactly where the
         // shooting can start.
         let target_mid = target_stats.map_or(0.0, |s| s.mid_y);
         let aim_from = stats.mid_pos(gtf);
-        let aim_at = crate::units::components::mid_pos(target_gtf, target_mid);
+        let aim_at = if blip {
+            radar_blip(crate::units::components::mid_pos(target_gtf, target_mid), tick.0)
+        } else {
+            crate::units::components::mid_pos(target_gtf, target_mid)
+        };
         // A folding unit that is already holding keeps holding until the
         // target is `DEPLOY_HOLD_SLACK` beyond its reach: every restart
         // of the chase costs it the fold and the ~1.75 s reopen, so a
@@ -1840,30 +1998,16 @@ pub fn attack_target_system(
         // closing in, as `CMobileCAI` does while `TryTarget` fails.
         let blocked = in_range
             && weapon_def.is_some_and(|w| {
-                !ground_line_of_fire(w, heightmap.as_deref(), aim_from, aim_at)
+                !ground_line_of_fire(w, heightmap.as_deref(), aim_from, aim_at, map_gravity)
                     || !free_line_of_fire(w, &spatial, &alliances, entity, team.0, aim_from, aim_at)
             });
 
         if stats.speed <= 0.0 && !in_range {
-            // Immobile unit (armed building) can never close the gap:
-            // hold the order for the target-lost timer, then drop it
-            // instead of churning MoveTarget insert/remove against
-            // `movement_system` every frame.
-            match lost {
-                Some(l) if tick.0.saturating_sub(l.since) >= TARGET_LOST_FRAMES => {
-                    commands
-                        .entity(entity)
-                        .remove::<(AttackTargetOrder, TargetLost)>();
-                }
-                Some(_) => {}
-                None => {
-                    commands.entity(entity).insert(TargetLost { since: tick.0 });
-                }
-            }
+            // An armed building can never close the gap: it keeps the
+            // order and fires when the target comes within reach (only a
+            // mobile target that is lost from sight ends it, above).
+            // Nothing to churn against `movement_system` either.
             continue;
-        }
-        if lost.is_some() {
-            commands.entity(entity).remove::<TargetLost>();
         }
 
         if stats.speed <= 0.0 && blocked {
@@ -2034,9 +2178,12 @@ mod tests {
                 team: 1,
                 kind: UnitKind::Bit,
                 hp_positive: true,
+                health: 1000.0,
+                armored: false,
                 is_flying: false,
                 cloaked: false,
                 detected_by: 0,
+                los_by: u64::MAX,
                 feature: false,
             });
         app.world_mut().run_system_once(combat_system).unwrap();
@@ -2108,9 +2255,12 @@ mod tests {
                 team: 1,
                 kind: UnitKind::Socket,
                 hp_positive: true,
+                health: 1000.0,
+                armored: false,
                 is_flying: false,
                 cloaked: false,
                 detected_by: 0,
+                los_by: u64::MAX,
                 feature: false,
             });
 
@@ -2160,9 +2310,12 @@ mod tests {
                 team: 1,
                 kind: UnitKind::Socket,
                 hp_positive: true,
+                health: 1000.0,
+                armored: false,
                 is_flying: false,
                 cloaked: false,
                 detected_by: 0,
+                los_by: u64::MAX,
                 feature: false,
             });
         let enemy_bit = app.world_mut().spawn_empty().id();
@@ -2179,9 +2332,12 @@ mod tests {
                 team: 1,
                 kind: UnitKind::Bit,
                 hp_positive: true,
+                health: 1000.0,
+                armored: false,
                 is_flying: false,
                 cloaked: false,
                 detected_by: 0,
+                los_by: u64::MAX,
                 feature: false,
             });
 
@@ -2263,9 +2419,13 @@ mod tests {
                 team: 1,
                 kind: UnitKind::Worm,
                 hp_positive: true,
+                health: 1000.0,
+                armored: false,
                 is_flying: false,
                 cloaked,
                 detected_by,
+                // A cloaked unit is never in an enemy's sight.
+                los_by: if cloaked { 0 } else { u64::MAX },
                 feature: false,
             });
         enemy
@@ -2304,9 +2464,12 @@ mod tests {
                 team: 1,
                 kind: UnitKind::Flow,
                 hp_positive: true,
+                health: 1000.0,
+                armored: false,
                 is_flying: true,
                 cloaked: false,
                 detected_by: 0,
+                los_by: u64::MAX,
                 feature: false,
             });
         app.world_mut().run_system_once(combat_system).unwrap();
@@ -2709,9 +2872,12 @@ mod tests {
                 team: 1,
                 kind,
                 hp_positive: true,
+                health: 1000.0,
+                armored: false,
                 is_flying: false,
                 cloaked: false,
                 detected_by: 0,
+                los_by: u64::MAX,
                 feature: false,
             });
         e
@@ -2853,9 +3019,12 @@ mod tests {
                 team: 0,
                 kind: UnitKind::Bit,
                 hp_positive: true,
+                health: 1000.0,
+                armored: false,
                 is_flying: false,
                 cloaked: false,
                 detected_by: 0,
+                los_by: u64::MAX,
                 feature: false,
             });
         ally
@@ -2969,9 +3138,12 @@ mod tests {
                 team: crate::units::features::FEATURE_TEAM,
                 kind: UnitKind::BadBlock,
                 hp_positive: true,
+                health: 1000.0,
+                armored: false,
                 is_flying: false,
                 cloaked: false,
                 detected_by: 0,
+                los_by: u64::MAX,
                 feature: true,
             });
         let spatial = app.world().resource::<SpatialIndex>();

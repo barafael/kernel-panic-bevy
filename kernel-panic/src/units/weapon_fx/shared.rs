@@ -74,9 +74,11 @@ pub struct DelayedHitInfo {
 /// A side effect bound to a projectile's point of impact.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ImpactEffect {
-    /// `areadenial.lua` on the NX Flag's explosion: spawn the owner's
-    /// denial zone at the impact position.
-    NxZone {
+    /// `areadenial.lua` on an area-denial shell's explosion (the NX Flag,
+    /// the Obelisk's Infection): spawn the owner's denial zone at the
+    /// impact position.
+    DenialZone {
+        weapon: crate::units::mechanics::command_fire::DenialWeapon,
         owner_team: u8,
         owner_faction: crate::units::components::Faction,
     },

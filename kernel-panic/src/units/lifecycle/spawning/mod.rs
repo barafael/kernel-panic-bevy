@@ -37,7 +37,9 @@ use crate::units::team_colors::{TeamColors, UnitColor};
 mod emerge;
 mod s3o_mount;
 
-pub use emerge::{BuildDriven, EmergeStyle, Emerging, FadeMaterials, emerge_system};
+pub use emerge::{
+    BuildDriven, EmergeStyle, Emerging, FadeMaterials, buildee_health, emerge_system,
+};
 pub use s3o_mount::PieceLayout;
 
 /// Bundles the asset / cache / registry resources `spawn_unit` needs.
@@ -531,12 +533,19 @@ pub fn spawn_unit_facing(
             .insert(crate::units::mechanics::worm::WormSplash(splash));
     }
 
-    // Logic Bombs spawn cloaked per their FBI; the Worm starts its
-    // surface-to-bite cycle submerged (worm.bos Create), so it does too.
+    // Logic Bombs cloak per their FBI (`Init_Cloaked`) and the Worm when
+    // worm.bos `Create` reaches `WANT_CLOAK` — in both cases only once
+    // the unit is built, never while it is a nanoframe.
     if kind == UnitKind::Worm || unit_registry.init_cloaked(kind) {
         commands
             .entity(unit_entity)
-            .insert(crate::units::mechanics::cloak::Cloaked);
+            .insert(crate::units::mechanics::worm::CloakWhenBuilt {
+                delay: if kind == UnitKind::Worm {
+                    crate::units::mechanics::worm::WORM_CLOAK_DELAY
+                } else {
+                    0.0
+                },
+            });
     }
 
     if kind == UnitKind::Port {

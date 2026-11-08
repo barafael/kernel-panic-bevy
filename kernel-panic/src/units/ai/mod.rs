@@ -477,6 +477,7 @@ fn snapshot(
     s.ai_teams.clear();
     s.structures.clear();
     s.homes.clear();
+    let mut fallback_homes: Vec<(u8, Vec3)> = Vec::new();
     // Canonical order (`NetId`, Spring's unit ids): the dice the AI
     // rolls per unit, and every "first" it picks, must not follow the
     // ECS's query order, which depends on archetype history the frame
@@ -520,11 +521,16 @@ fn snapshot(
         // KPAI `forceSize`: one per unit of any kind, buildings included.
         *s.force.entry(team.0).or_default() += 1;
         let homebase = kind.is_homebase();
-        if homebase && is_ai(team.0) && !s.ai_teams.contains(&team.0) {
+        // Upstream's brain runs every AI team in play, homebase or not
+        // (`teamData` is never pruned; a team with only minifacs is alive,
+        // `game_over.lua`'s `isLifeSustainerFunc`).
+        if kind.is_factory() && is_ai(team.0) && !s.ai_teams.contains(&team.0) {
             s.ai_teams.push(team.0);
         }
         if homebase {
             s.homes.entry(team.0).or_default().push(snap.pos);
+        } else if kind.is_minifac() {
+            fallback_homes.push((team.0, snap.pos));
         }
         if homebase || kind.is_small_building() {
             s.structures.push(EnemyStructure {
@@ -535,6 +541,14 @@ fn snapshot(
         }
     }
     s.ai_teams.sort_unstable();
+    // A team that lost its homebase is defended and rallied around its
+    // minifacs instead.
+    let homebase_teams: Vec<u8> = s.homes.keys().copied().collect();
+    for (team, pos) in fallback_homes {
+        if s.ai_teams.contains(&team) && !homebase_teams.contains(&team) {
+            s.homes.entry(team).or_default().push(pos);
+        }
+    }
 
     let claim_sq = DATAVENT_CLAIM_RADIUS * DATAVENT_CLAIM_RADIUS;
     s.vents.clear();
@@ -581,6 +595,18 @@ fn run_factories(
             );
         };
         if let Some(roster) = homebase_roster(ut.0) {
+            // Homebases start on repeat (the human's `kp_autospam.lua`);
+            // KPAI refills its own queue, so a repeating one would never
+            // drain.
+            if producer.repeat() {
+                orders.issue_as(
+                    team,
+                    SimCommand::SetRepeat {
+                        units: Units::of([factory]),
+                        on: false,
+                    },
+                );
+            }
             if producer.queue().len() > HOMEBASE_REFILL_AT {
                 continue;
             }
@@ -1140,9 +1166,12 @@ mod tests {
             team,
             kind,
             hp_positive: true,
+            health: 1000.0,
+            armored: false,
             is_flying: false,
             cloaked: false,
             detected_by: 0,
+            los_by: u64::MAX,
             feature: false,
         }
     }

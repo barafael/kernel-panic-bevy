@@ -1191,9 +1191,12 @@ mod tests {
                 team: 0,
                 kind: UnitKind::Bit,
                 hp_positive: true,
+                health: 1000.0,
+                armored: false,
                 is_flying: false,
                 cloaked: false,
                 detected_by: 0,
+                los_by: u64::MAX,
                 feature: false,
             });
         advance(&mut world, 0.1);
@@ -1444,9 +1447,12 @@ mod tests {
                 team: crate::units::features::FEATURE_TEAM,
                 kind: UnitKind::BadBlock,
                 hp_positive: true,
+                health: 1000.0,
+                armored: false,
                 is_flying: false,
                 cloaked: false,
                 detected_by: 0,
+                los_by: u64::MAX,
                 feature: true,
             });
         entity

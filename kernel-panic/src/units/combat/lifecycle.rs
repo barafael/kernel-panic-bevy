@@ -226,14 +226,20 @@ pub fn tick_kamikaze(
     // `CUnit::SlowUpdate` returns from its stunned branch before
     // `SlowUpdateKamikaze`: a paralyzed bomb does not scan.
     bombs: Query<
-        (Entity, &Kamikaze, &TeamId, &GlobalTransform),
+        (Entity, &Kamikaze, &TeamId, &GlobalTransform, &NetId),
         (Without<Dying>, Without<Stunned>),
     >,
     mut health_q: Query<&mut Health>,
     spatial: Res<SpatialIndex>,
     alliances: Res<Alliances>,
+    tick: Res<SimTick>,
 ) {
-    for (entity, bomb, team, gtf) in &bombs {
+    for (entity, bomb, team, gtf, net) in &bombs {
+        // `SlowUpdateKamikaze` runs on the unit's own slow update (every
+        // 15 frames, staggered by id), not every frame.
+        if !slow_update_due(tick.frame(), net.0) {
+            continue;
+        }
         let trigger_radius = bomb.trigger_radius;
         let trigger_sq = trigger_radius * trigger_radius;
         let self_pos = gtf.translation();
@@ -245,7 +251,8 @@ pub fn tick_kamikaze(
             }
             // `GetEnemyUnits(pos, kamikazeDist, allyteam)`.
             let enemy = !alliances.friendly(candidate.team, team.0);
-            if enemy && candidate.pos.distance_squared(self_pos) <= trigger_sq {
+            // `GetEnemyUnits` takes units strictly inside the radius.
+            if enemy && candidate.pos.distance_squared(self_pos) < trigger_sq {
                 triggered = true;
             }
         });
@@ -421,6 +428,7 @@ pub fn death_system(
 /// a tiny bridge instead of a parallel detonation path. A paralyzed
 /// unit's countdown stands still (`CUnit::SlowUpdate` returns from its
 /// stunned branch before the `selfDCountdown` decrement).
+#[allow(clippy::type_complexity)]
 pub fn tick_self_destruct(
     time: Res<Time>,
     mut query: Query<
@@ -659,16 +667,30 @@ mod tests {
             team: 1,
             kind: UnitKind::Bit,
             hp_positive: true,
+            health: 1000.0,
+            armored: false,
             is_flying: false,
             cloaked: false,
             detected_by: 0,
+            los_by: u64::MAX,
             feature: false,
         });
         world.insert_resource(spatial);
         world.init_resource::<Alliances>();
+        // Only on the bomb's own slow update frame.
+        let id = world.get::<NetId>(bomb).unwrap().0;
+        world.insert_resource(SimTick(crate::sim::next_slow_update(1, id)));
         world.run_system_once(tick_kamikaze).unwrap();
         assert_eq!(world.get::<Health>(bomb).unwrap().current, 100.0);
         world.entity_mut(bomb).remove::<Stunned>();
+        world.insert_resource(SimTick(crate::sim::next_slow_update(1, id) + 1));
+        world.run_system_once(tick_kamikaze).unwrap();
+        assert_eq!(
+            world.get::<Health>(bomb).unwrap().current,
+            100.0,
+            "not on its slow update"
+        );
+        world.insert_resource(SimTick(crate::sim::next_slow_update(2, id)));
         world.run_system_once(tick_kamikaze).unwrap();
         assert_eq!(world.get::<Health>(bomb).unwrap().current, 0.0);
     }
@@ -757,13 +779,18 @@ mod tests {
             team: 1,
             kind: UnitKind::Bit,
             hp_positive: true,
+            health: 1000.0,
+            armored: false,
             is_flying: false,
             cloaked: false,
             detected_by: 0,
+            los_by: u64::MAX,
             feature: false,
         });
         world.insert_resource(spatial);
         world.init_resource::<Alliances>();
+        let id = world.get::<NetId>(bomb).unwrap().0;
+        world.insert_resource(SimTick(crate::sim::next_slow_update(1, id)));
 
         world.run_system_once(tick_kamikaze).unwrap();
         assert_eq!(world.get::<Health>(bomb).unwrap().current, 0.0);
