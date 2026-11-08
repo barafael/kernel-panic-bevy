@@ -53,6 +53,8 @@ pub(super) struct VolumeHitCtx<'w, 's> {
     alliances: Res<'w, Alliances>,
     /// Terrain for guided projectiles' ground impacts.
     heightmap: Option<Res<'w, Heightmap>>,
+    /// Units that still exist: a shell's owner may have died in flight.
+    owners: Query<'w, 's, (), With<crate::units::components::UnitType>>,
 }
 
 /// The camera the ribbon effects face and the quad batches they draw
@@ -141,6 +143,7 @@ pub(super) fn tick_weapon_fx(
             &weapon_registry,
             &mut damage_queue,
             &mut pending_explosions,
+            &volume_ctx.owners,
             sounds,
             commands,
         );
@@ -815,6 +818,7 @@ fn trigger_delayed_hit(
     weapon_registry: &WeaponRegistry,
     damage_queue: &mut DamageQueue,
     pending_explosions: &mut PendingExplosions,
+    owners: &Query<(), With<crate::units::components::UnitType>>,
     sounds: &mut crate::audio::SoundQueue,
     commands: &mut Commands,
 ) {
@@ -835,16 +839,23 @@ fn trigger_delayed_hit(
         detonated: false,
     });
     match hit.on_impact {
-        Some(super::shared::ImpactEffect::NxZone {
+        Some(super::shared::ImpactEffect::DenialZone {
+            weapon,
             owner_team,
             owner_faction,
         }) => {
-            commands.spawn(crate::units::mechanics::command_fire::nx_zone(
-                impact_pos,
-                hit.attacker,
-                owner_team,
-                owner_faction,
-            ));
+            // `areadenial.lua`'s `Explosion` only starts a zone while the
+            // firing unit still exists: a Pointer killed while the shell
+            // flies leaves just the blast.
+            if owners.contains(hit.attacker) {
+                commands.spawn(crate::units::mechanics::command_fire::denial_zone(
+                    weapon,
+                    impact_pos,
+                    hit.attacker,
+                    owner_team,
+                    owner_faction,
+                ));
+            }
         }
         Some(super::shared::ImpactEffect::LogicBomb {
             owner_team,
@@ -1331,9 +1342,12 @@ mod tests {
                 team,
                 kind: UnitKind::Bit,
                 hp_positive: true,
+                health: 1000.0,
+                armored: false,
                 is_flying: false,
                 cloaked: false,
                 detected_by: 0,
+                los_by: u64::MAX,
                 feature: false,
             });
         }
@@ -1917,9 +1931,12 @@ mod tests {
                     team,
                     kind: UnitKind::Bit,
                     hp_positive: true,
+                    health: 1000.0,
+                    armored: false,
                     is_flying: false,
                     cloaked: false,
                     detected_by: 0,
+                    los_by: u64::MAX,
                     feature: false,
                 });
             e

@@ -1207,12 +1207,10 @@ impl ApplyCtx<'_, '_> {
             })
             .sum::<Vec3>()
             / units.len() as f32;
-        // Hidden from the issuers: a cloaked unit none of their teams
-        // has detected (`SelectCircleUnits` takes LOS / radar).
+        // Hidden from the issuers: a unit none of their teams has in
+        // sight or on radar (`SelectCircleUnits` takes LOS / radar).
         let hidden = |e: &crate::units::spatial::SpatialEntry| {
-            units.iter().all(|u| {
-                crate::units::mechanics::cloak::hidden_from(e.cloaked, e.detected_by, u.team)
-            })
+            units.iter().all(|u| !e.targetable_by(u.team))
         };
         let friendly_to_all = |team: u8| units.iter().all(|u| self.friendly(u.team, team));
         let mut found: Vec<(f32, NetId, Entity, Vec3, UnitKind, u8)> = Vec::new();
@@ -1729,9 +1727,13 @@ mod tests {
                 team,
                 kind,
                 hp_positive: true,
+                health: 1000.0,
+                armored: false,
                 is_flying: false,
                 cloaked,
                 detected_by: 0,
+                // A cloaked unit is never in an enemy's sight.
+                los_by: if cloaked { 0 } else { u64::MAX },
                 feature,
             });
     }

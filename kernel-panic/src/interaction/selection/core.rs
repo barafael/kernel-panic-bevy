@@ -134,12 +134,24 @@ pub(crate) struct PickRayCast<'w, 's> {
             With<TerrainChunkMarker>,
         )>,
     >,
+    /// The map point under the cursor while it is over the minimap.
+    minimap: Option<Res<'w, crate::ui::minimap::MinimapPointer>>,
 }
 
 impl PickRayCast<'_, '_> {
+    /// Straight down onto the map point under the cursor, while the
+    /// cursor is over the minimap (`CMiniMap::ProxyMousePress`): the
+    /// ray the orders and unit picks use instead of the 3-D view's.
+    fn minimap_ray(&self) -> Option<Ray3d> {
+        let p = self.minimap.as_ref()?.world?;
+        Some(Ray3d::new(Vec3::new(p.x, 10_000.0, p.y), Dir3::NEG_Y))
+    }
+
     /// Nearest-first hits of `ray` against units and terrain.
     pub(crate) fn cast(&mut self, ray: Ray3d) -> &[(Entity, RayMeshHit)] {
-        let Self { ray_cast, pickable } = self;
+        let Self {
+            ray_cast, pickable, ..
+        } = self;
         let filter = |e: Entity| pickable.contains(e);
         ray_cast.cast_ray(ray, &MeshRayCastSettings::default().with_filter(&filter))
     }
@@ -191,7 +203,9 @@ fn update_hover(
     cache.camera = camera;
     cache.frames_since_cast = 0;
 
-    let target = cursor_ray(&windows, &camera_q)
+    let target = ray_cast
+        .minimap_ray()
+        .or_else(|| cursor_ray(&windows, &camera_q))
         .and_then(|ray| resolve_unit_hit(ray_cast.cast(ray), &unit_q, &parent_q))
         .filter(|&unit| !dying_q.contains(unit));
 
@@ -559,7 +573,9 @@ pub(crate) fn ground_hit(
     camera_q: &Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
     ray_cast: &mut PickRayCast,
 ) -> Option<Vec3> {
-    let ray = cursor_ray(windows, camera_q)?;
+    let ray = ray_cast
+        .minimap_ray()
+        .or_else(|| cursor_ray(windows, camera_q))?;
     ray_cast.cast(ray).first().map(|(_, hit)| hit.point)
 }
 
@@ -575,7 +591,9 @@ pub(crate) fn unit_hit(
     unit_q: &Query<Entity, With<UnitType>>,
     parent_q: &Query<&ChildOf>,
 ) -> Option<Entity> {
-    let ray = cursor_ray(windows, camera_q)?;
+    let ray = ray_cast
+        .minimap_ray()
+        .or_else(|| cursor_ray(windows, camera_q))?;
     resolve_unit_hit(ray_cast.cast(ray), unit_q, parent_q)
 }
 

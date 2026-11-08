@@ -1,11 +1,9 @@
-//! Unit groups: bind the current selection to a digit with `Ctrl+1..9`,
-//! recall it with bare `1..9`. Plain recall replaces the selection;
-//! `Shift+1..9` adds the group to the existing selection.
-//!
-//! Mirrors the Spring / StarCraft hotkey contract — there's no
-//! "center camera on group" yet (would slot in via [`RtsCameraState`]
-//! if the group has any live members). Done as a follow-up to plan
-//! §10.1.
+//! Unit groups (`CGroupHandler::GroupCommand`): bind the current
+//! selection to a digit with `Ctrl+0..9` (`Ctrl+Shift` adds), recall it
+//! with the bare digit — pressed again while the group is the selection,
+//! it also centres the camera on it. `Shift+digit` adds the group to the
+//! selection, `Alt+digit` toggles its members in it. A unit is in one
+//! group at most.
 
 use crate::map_loading::MatchScopeAppExt;
 use bevy::prelude::*;
@@ -22,8 +20,9 @@ impl Plugin for UnitGroupsPlugin {
     }
 }
 
-/// Number of recallable groups, indexed by digit key 1..9.
-pub const GROUP_COUNT: usize = 9;
+/// Number of recallable groups, indexed by digit key 0..9
+/// (`KeyBindings.cpp:138` binds `Any+0` to `group0`).
+pub const GROUP_COUNT: usize = 10;
 
 /// Stored selections, one per digit. Dead entities stay until the next
 /// assign — `handle_unit_groups` filters via the live entity query at
@@ -31,15 +30,37 @@ pub const GROUP_COUNT: usize = 9;
 /// `CGroup::RemoveUnit` drops a unit at its death), so a group whose
 /// units have all died recalls to nothing rather than reselecting
 /// corpses or panicking on a stale `Entity`.
+///
+/// A unit belongs to one group at most (`CUnit::SetGroup` leaves the old
+/// one): assigning it elsewhere takes it out of its previous slot.
 #[derive(Resource, Default)]
 pub struct UnitGroups {
     slots: [Vec<Entity>; GROUP_COUNT],
 }
 
 impl UnitGroups {
+    /// Ctrl+digit: the group becomes exactly `entities`.
     pub fn assign(&mut self, slot: usize, entities: impl IntoIterator<Item = Entity>) {
         if slot < GROUP_COUNT {
-            self.slots[slot] = entities.into_iter().collect();
+            self.slots[slot].clear();
+            self.add(slot, entities);
+        }
+    }
+
+    /// Ctrl+Shift+digit: `entities` join the group (leaving their old ones).
+    pub fn add(&mut self, slot: usize, entities: impl IntoIterator<Item = Entity>) {
+        if slot >= GROUP_COUNT {
+            return;
+        }
+        for entity in entities {
+            for (i, members) in self.slots.iter_mut().enumerate() {
+                if i != slot {
+                    members.retain(|&e| e != entity);
+                }
+            }
+            if !self.slots[slot].contains(&entity) {
+                self.slots[slot].push(entity);
+            }
         }
     }
 
@@ -48,17 +69,19 @@ impl UnitGroups {
     }
 }
 
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn handle_unit_groups(
     keys: Res<ButtonInput<KeyCode>>,
     selected_q: Query<Entity, With<Selected>>,
     all_units_q: Query<
-        Entity,
+        (Entity, &Transform),
         (
             With<crate::units::components::UnitType>,
             Without<crate::units::combat::Dying>,
         ),
     >,
     mut groups: ResMut<UnitGroups>,
+    mut cameras: Query<&mut crate::rendering::camera::RtsCameraState>,
     mut commands: Commands,
 ) {
     let Some((slot, key)) = digit_just_pressed(&keys) else {
@@ -66,10 +89,19 @@ fn handle_unit_groups(
     };
     let ctrl = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
     let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+    let alt = keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight);
 
+    // `CGroupHandler::GroupCommand`: Ctrl sets the group (with Shift it
+    // adds), Shift adds the group to the selection, Alt toggles its
+    // members in it, a plain press selects it — and focuses the camera
+    // when it already is the selection.
     if ctrl {
         let live: Vec<Entity> = selected_q.iter().collect();
-        groups.assign(slot, live);
+        if shift {
+            groups.add(slot, live);
+        } else {
+            groups.assign(slot, live);
+        }
         info!(
             "Assigned {} units to group {}",
             groups.recall(slot).len(),
@@ -78,29 +110,62 @@ fn handle_unit_groups(
         return;
     }
 
-    let members = groups.recall(slot);
+    let members: Vec<Entity> = groups
+        .recall(slot)
+        .iter()
+        .copied()
+        // Skip stale entities — reactivating a slot must not revive
+        // despawned ids; the unit query gates us cleanly.
+        .filter(|&e| all_units_q.get(e).is_ok())
+        .collect();
     if members.is_empty() {
         return;
     }
 
-    if !shift {
-        for entity in &selected_q {
-            commands.entity(entity).remove::<Selected>();
-        }
-    }
-    for &entity in members {
-        // Skip stale entities — reactivating a slot must not revive
-        // despawned ids; the unit query gates us cleanly.
-        if all_units_q.get(entity).is_ok() {
+    if shift {
+        for &entity in &members {
             commands.entity(entity).insert(Selected);
         }
+        return;
+    }
+    if alt {
+        for &entity in &members {
+            if selected_q.get(entity).is_ok() {
+                commands.entity(entity).remove::<Selected>();
+            } else {
+                commands.entity(entity).insert(Selected);
+            }
+        }
+        return;
+    }
+
+    let already_selected = selected_q.iter().count() == members.len()
+        && members.iter().all(|&e| selected_q.get(e).is_ok());
+    if already_selected {
+        // `CalculateCenter`: the mean of the members' positions.
+        let sum: Vec3 = members
+            .iter()
+            .filter_map(|&e| all_units_q.get(e).ok())
+            .map(|(_, t)| t.translation)
+            .sum();
+        let center = sum / members.len() as f32;
+        for mut cam in &mut cameras {
+            cam.focus.x = center.x;
+            cam.focus.z = center.z;
+        }
+    }
+    for entity in &selected_q {
+        commands.entity(entity).remove::<Selected>();
+    }
+    for &entity in &members {
+        commands.entity(entity).insert(Selected);
     }
 }
 
-/// `1..=9` map to slots `0..=8`. `0` is intentionally unbound — Spring
-/// has no group 0; "all units" is `Ctrl+A` (`core::select_all_units`).
+/// `1..=9` map to slots `1..=9`, `0` to slot `0`.
 fn digit_just_pressed(keys: &ButtonInput<KeyCode>) -> Option<(usize, u8)> {
     const DIGITS: [(KeyCode, u8); GROUP_COUNT] = [
+        (KeyCode::Digit0, 0),
         (KeyCode::Digit1, 1),
         (KeyCode::Digit2, 2),
         (KeyCode::Digit3, 3),
@@ -114,7 +179,7 @@ fn digit_just_pressed(keys: &ButtonInput<KeyCode>) -> Option<(usize, u8)> {
     DIGITS
         .iter()
         .find(|(code, _)| keys.just_pressed(*code))
-        .map(|(_, n)| ((*n - 1) as usize, *n))
+        .map(|(_, n)| (*n as usize, *n))
 }
 
 #[cfg(test)]
@@ -138,15 +203,16 @@ mod tests {
         use crate::units::content::definitions::UnitKind;
         use bevy::ecs::system::RunSystemOnce;
         let mut world = World::new();
-        let alive = world.spawn(UnitType(UnitKind::Bit)).id();
+        let alive = world.spawn((UnitType(UnitKind::Bit), Transform::default())).id();
         let dying = world
             .spawn((
                 UnitType(UnitKind::Bit),
+                Transform::default(),
                 crate::units::combat::Dying { timer: 1.0 },
             ))
             .id();
         let mut groups = UnitGroups::default();
-        groups.assign(0, [alive, dying]);
+        groups.assign(1, [alive, dying]);
         world.insert_resource(groups);
         let mut keys = ButtonInput::<KeyCode>::default();
         keys.press(KeyCode::Digit1);
@@ -154,6 +220,24 @@ mod tests {
         world.run_system_once(handle_unit_groups).unwrap();
         assert!(world.get::<Selected>(alive).is_some());
         assert!(world.get::<Selected>(dying).is_none());
+    }
+
+    /// A unit is in one group: assigning it elsewhere moves it; adding
+    /// keeps the rest of the group.
+    #[test]
+    fn a_unit_has_one_group() {
+        let mut groups = UnitGroups::default();
+        let e1 = Entity::from_raw_u32(1).unwrap();
+        let e2 = Entity::from_raw_u32(2).unwrap();
+        groups.assign(1, [e1, e2]);
+        groups.assign(2, [e1]);
+        assert_eq!(groups.recall(1), &[e2]);
+        assert_eq!(groups.recall(2), &[e1]);
+        groups.add(2, [e2]);
+        assert_eq!(groups.recall(2), &[e1, e2]);
+        assert!(groups.recall(1).is_empty());
+        groups.assign(0, [e1]);
+        assert_eq!(groups.recall(0), &[e1]);
     }
 
     #[test]

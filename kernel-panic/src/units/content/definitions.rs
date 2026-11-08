@@ -240,6 +240,18 @@ impl UnitKind {
         matches!(self, UnitKind::Socket | UnitKind::Window | UnitKind::Port)
     }
 
+    /// Units whose script turns the radar on (`set ACTIVATION to 1`:
+    /// `assembler.bos:15`, `trojan.bos:22`, `gateway.bos:18`). The Byte's
+    /// and Connection's `RadarDistance=200` never switches on: their
+    /// scripts don't activate, and the units aren't on/off-able. (The
+    /// Worm's starts 5 s after it is built; not modelled.)
+    pub fn activates_radar(self) -> bool {
+        matches!(
+            self,
+            UnitKind::Assembler | UnitKind::Trojan | UnitKind::Gateway
+        )
+    }
+
     /// "Factory" per upstream `game_over.lua` (gamemode 1, the default):
     /// `kpunittypes.lua`'s `isHomeBase` + `isMiniFac`. A team that owns
     /// none of these is out of the game.

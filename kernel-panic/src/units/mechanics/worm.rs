@@ -61,6 +61,47 @@ pub struct Surfaced {
     pub base_speed: f32,
 }
 
+/// A unit that cloaks once it is finished and `delay` seconds have run:
+/// `CUnit` never cloaks a unit that is still being built
+/// (`Unit.cpp:1049-1055`: `isCloaked = wantCloak` only when not
+/// `beingBuilt`), so a Logic Bomb (`Init_Cloaked`) cloaks the moment it
+/// is done, and a Worm — which has none — when worm.bos `Create` gets to
+/// `set WANT_CLOAK`.
+#[derive(Component, Clone, Copy, Debug)]
+pub struct CloakWhenBuilt {
+    pub delay: f32,
+}
+
+/// worm.bos `Create` after the build: `sleep 5000` (a `sleep` lasts
+/// `5000/33 + 1` frames), the head retracts for `sleep 1333` (41
+/// frames), then `set WANT_CLOAK`: 193 frames in all.
+pub const WORM_CLOAK_DELAY: f32 = (5000 / 33 + 1 + 1333 / 33 + 1) as f32 / 30.0;
+
+/// Cloak the finished units that were waiting for it.
+#[allow(clippy::type_complexity)]
+pub fn promote_cloak_when_built(
+    time: Res<Time>,
+    mut waiting: Query<
+        (Entity, &mut CloakWhenBuilt),
+        (
+            Without<crate::units::lifecycle::spawning::Emerging>,
+            Without<Dying>,
+        ),
+    >,
+    mut commands: Commands,
+) {
+    let dt = time.delta_secs();
+    for (entity, mut wait) in &mut waiting {
+        wait.delay -= dt;
+        if wait.delay <= 0.0 {
+            commands
+                .entity(entity)
+                .remove::<CloakWhenBuilt>()
+                .try_insert(Cloaked);
+        }
+    }
+}
+
 /// The weapon a Worm's bite detonates (FBI `Weapon2=Wormsplash`),
 /// resolved at spawn so the fire path doesn't hash names per bite.
 #[derive(Component, Clone, Copy, Debug)]

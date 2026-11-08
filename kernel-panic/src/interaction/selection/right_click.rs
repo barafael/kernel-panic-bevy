@@ -498,6 +498,46 @@ fn handle_right_click(
                 }
             }
 
+            // A friendly unit under the cursor: the default command of a
+            // mobile unit is Guard (`CMobileCAI::GetDefaultCmd`,
+            // `MobileCAI.cpp:974-997`). Units that can't guard (they take
+            // no move orders) ignore the click.
+            let friend = my_team.and_then(|mine| {
+                unit_hit(&windows, &camera_q, &mut ray_cast, &unit_root_q, &parent_q).filter(
+                    |&t| {
+                        unit_info_q
+                            .get(t)
+                            .is_ok_and(|tt| alliances.friendly(mine, tt.0))
+                    },
+                )
+            });
+            if let Some(friend) = friend {
+                let guards: Vec<Entity> = selected_q
+                    .iter()
+                    .filter(|(e, _, u, _)| {
+                        *e != friend
+                            && (unit_registry.speed(u.0) > 0.0 || u.0.takes_rally_orders())
+                    })
+                    .map(|(e, ..)| e)
+                    .collect();
+                if !guards.is_empty() {
+                    if let Some(target) = net.id(friend) {
+                        let units = net.units(guards);
+                        net.issue(SimCommand::Order {
+                            units,
+                            order: Order::Guard(target),
+                            queue: shift,
+                        });
+                    }
+                    let pos = target_gtf_q
+                        .get(friend)
+                        .map_or(drag_path.points[0], |t| t.translation());
+                    pending.markers.push((pos, OrderMarker::Guard));
+                    drag_path.points.clear();
+                    return;
+                }
+            }
+
             // Plain ground move: every unit gets the clicked point, as a
             // single right-click does in Spring (KP's CustomFormations2
             // widget passes single clicks straight to the engine). The

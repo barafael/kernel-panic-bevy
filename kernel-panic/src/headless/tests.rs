@@ -1243,10 +1243,16 @@ fn bug_bombards_by_walking_in_and_deploying() {
             let at = |world: &World, p: Vec3| world.resource::<Heightmap>().place(p.x, p.z);
             let p0 = at(world, kernel + toward * 300.0);
             let p1 = at(world, kernel + toward * 1800.0);
+            let p2 = at(world, kernel + toward * 1360.0);
             let mut state: SystemState<SpawnContext> = SystemState::new(world);
             let mut ctx = state.get_mut(world).expect("spawn context");
             let bug = spawn_unit(UnitKind::Bug, Faction::Hacker, 0, p0, &mut ctx);
             let byte = spawn_unit(UnitKind::Byte, Faction::System, 1, p1, &mut ctx);
+            // A spotter: the Exploit's own sight (300) falls far short of
+            // the Byte at bombardment range, and a weapon only takes what
+            // its team has in sight or on radar. An Assembler's radar
+            // (480) covers the Byte from outside its own reach.
+            spawn_unit(UnitKind::Assembler, Faction::System, 0, p2, &mut ctx);
             state.apply(world);
             (bug, byte)
         };

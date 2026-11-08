@@ -117,7 +117,6 @@ impl Plugin for UnitsPlugin {
             .add_message::<deploy::DeployEvent>()
             .add_message::<network_buffer::EnterEvent>()
             .init_resource::<cloak::FogEnabled>()
-            .init_resource::<animation::DeathParticleAssets>()
             .init_resource::<animation::debris::ShatterCache>()
             .init_match_resource::<animation::debris::PendingDebris>()
             .init_match_resource::<SimRng<animation::debris::DebrisRng>>()
@@ -134,7 +133,6 @@ impl Plugin for UnitsPlugin {
             // between the last two sim poses (`rendering::interpolation`).
             .register_required_components::<components::UnitType, SimPose>()
             .register_required_components::<animation::PieceIndex, SimPose>()
-            .register_required_components::<animation::DeathParticle, SimPose>()
             .register_required_components::<animation::debris::Debris, SimPose>()
             .register_required_components::<animation::debris::Shard, SimPose>()
             .register_required_components::<command_fire::SigTermSignal, SimPose>()
@@ -218,6 +216,7 @@ impl Plugin for UnitsPlugin {
                         )
                             .chain(),
                         spawning::emerge_system,
+                        spawning::buildee_health,
                     )
                         .chain()
                         .in_set(GameplaySet::Produce),
@@ -244,10 +243,15 @@ impl Plugin for UnitsPlugin {
                             // (kamikaze, detector, …) this same tick.
                             bookkeeping::tag_unit_kinds,
                             worm::init_autohold,
+                            worm::promote_cloak_when_built,
                             cloak::update_cloak_detection,
                             spatial::rebuild_spatial_index,
                             combat::sync_deploy_state,
                             combat::tick_kamikaze,
+                            combat::engage::engage_leash_system,
+                            combat::engage::idle_engage_system,
+                            combat::engage::fight_resume_system,
+                            combat::engage::fight_divert_system,
                             combat::drive_aim_script,
                             combat::combat_system,
                             combat::attack_ground_system,
@@ -262,6 +266,7 @@ impl Plugin for UnitsPlugin {
                             command_fire::advance_pending_casts,
                             command_fire::process_command_fire,
                             command_fire::tick_nx_casts,
+                            command_fire::tick_infection_casts,
                             command_fire::tick_mine_launches,
                             command_fire::tick_command_fire_cooldown,
                             command_fire::tick_area_denial,
@@ -308,7 +313,6 @@ impl Plugin for UnitsPlugin {
                         animation::debris::tick_debris,
                         animation::sync_muzzle_pieces,
                         combat::sync_byte_fold_state,
-                        animation::decay_death_particles,
                         cloak::sync_fog_enabled,
                         cloak::hide_new_hostiles,
                         cloak::update_cloak_visibility,

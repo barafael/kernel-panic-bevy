@@ -49,6 +49,10 @@ type ActiveOrder = (
         crate::units::mechanics::deploy::BombardOrder,
         crate::units::mechanics::network_buffer::EnterOrder,
         crate::units::mechanics::network_buffer::DispatchOrder,
+        // A self-given engagement and a fight leg's detour end with it.
+        crate::units::combat::engage::Engaged,
+        crate::units::combat::engage::FightGoal,
+        crate::units::mechanics::command_fire::InfectionCast,
     ),
 );
 

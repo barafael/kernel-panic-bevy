@@ -41,8 +41,9 @@ pub struct Producer {
     spawn_count: u32,
     /// Spring `CMD.REPEAT`: when a queued unit finishes it is re-appended
     /// to the back of the queue instead of dropped, so the factory cycles
-    /// its queue forever. Minifacs start with it on (upstream
-    /// `kp_autospam.lua`); homebases start with it off.
+    /// its queue forever. Every factory starts with it on (upstream
+    /// `kp_autospam.lua` gives the human player's homebases and minifacs
+    /// `CMD.REPEAT`); the AI switches it off on the factories it runs.
     repeat: bool,
     /// A build step ran this frame (`CFactory::UpdateBuild`): the window
     /// between the script's `StartBuilding` and `StopBuilding`.
@@ -268,7 +269,13 @@ pub fn minifac_spam(minifac: UnitKind) -> Option<UnitKind> {
 
 pub fn default_production(kind: UnitKind) -> Option<Producer> {
     if kind.is_homebase() {
-        return Some(Producer::new());
+        // `kp_autospam.lua` turns Repeat on for the human's Kernel, Hole
+        // and Carrier (`UnitCreated`, and frame 2 for the start units).
+        // Seats the AI plays switch it off again (`ai::order_factories`):
+        // KPAI manages its own queue.
+        let mut producer = Producer::new();
+        producer.repeat = true;
+        return Some(producer);
     }
     // Minifacs autospam from the moment they finish building:
     // upstream `kp_autospam.lua` gives every socket `REPEAT` + `bit`
@@ -1028,9 +1035,12 @@ mod tests {
             team: 0,
             kind: UnitKind::Bit,
             hp_positive: true,
+            health: 1000.0,
+            armored: false,
             is_flying: false,
             cloaked: false,
             detected_by: 0,
+            los_by: u64::MAX,
             feature: false,
         }
     }
@@ -1069,7 +1079,7 @@ mod tests {
 
     /// Minifacs start spamming their faction's swarm unit on repeat
     /// (upstream `kp_autospam.lua`); Ports stay teleporters and
-    /// homebases start idle with repeat off.
+    /// homebases start idle with repeat on.
     #[test]
     fn minifacs_default_to_autospam() {
         let socket = default_production(UnitKind::Socket).unwrap();
@@ -1080,7 +1090,7 @@ mod tests {
         assert_eq!(window.current_production(), Some(UnitKind::Bug));
         assert!(default_production(UnitKind::Port).is_none());
         let kernel = default_production(UnitKind::Kernel).unwrap();
-        assert!(!kernel.repeat());
+        assert!(kernel.repeat());
         assert!(kernel.queue().is_empty());
     }
 

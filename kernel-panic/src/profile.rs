@@ -149,17 +149,13 @@ fn census(world: &mut World) {
         .query::<&crate::units::combat::Dying>()
         .iter(world)
         .count();
-    let deaths = world
-        .query::<&crate::units::assets::animation::DeathParticle>()
-        .iter(world)
-        .count();
     let fx = crate::units::weapon_fx::effect_counts(world);
     let pending = world
         .resource::<crate::units::weapon_fx::PendingExplosions>()
         .events
         .len();
     println!(
-        "KP_PROFILE census worst_frame={worst:.1}ms entities={entities} units={units} dying={dying} death_bursts={deaths} pending_explosions={pending} {fx:?} added(img,mesh,mat)={added:?} modified={modified:?}"
+        "KP_PROFILE census worst_frame={worst:.1}ms entities={entities} units={units} dying={dying} pending_explosions={pending} {fx:?} added(img,mesh,mat)={added:?} modified={modified:?}"
     );
 }
 

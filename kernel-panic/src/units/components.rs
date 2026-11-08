@@ -111,7 +111,7 @@ impl Faction {
 ///
 /// [`NetId`]: crate::net::NetId
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Component)]
-#[require(crate::net::NetId)]
+#[require(crate::net::NetId, crate::units::mechanics::cloak::SightedBy)]
 pub struct UnitType(pub UnitKind);
 
 /// Current health.

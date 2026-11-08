@@ -128,15 +128,6 @@ pub fn team_bit(team: u8) -> u64 {
     1u64.checked_shl(u32::from(team)).unwrap_or(0)
 }
 
-/// Whether a unit with the given stealth state is hidden from `team`:
-/// cloaked and not currently detected by any of that team's detectors.
-/// Upstream Spring can't aim at a cloaked unit outside its allyteam's
-/// decloak coverage, so auto-targeting (and set-target) skip it — AoE
-/// and kamikaze proximity still hit it normally.
-pub fn hidden_from(cloaked: bool, detected_by: u64, team: u8) -> bool {
-    cloaked && detected_by & team_bit(team) == 0
-}
-
 /// Marker: this unit is currently visible to the [`LocalTeam`].
 /// Friendly units always carry it (they're always visible); enemies
 /// have it added when they enter sight and removed when they leave.
@@ -183,61 +174,174 @@ impl Default for FogRefreshTimer {
     }
 }
 
-/// Refresh timer for `update_cloak_detection`, whose [`DetectedBy`]
-/// masks feed targeting: sim state, so match-scoped (every match scans
-/// on the same ticks, whatever ran before).
+/// Refresh timer for `update_cloak_detection`, whose [`SightedBy`] and
+/// [`DetectedBy`] masks feed targeting: sim state, so match-scoped
+/// (every match scans on the same ticks, whatever ran before).
 #[derive(Resource, Default)]
 pub struct CloakDetectionTimer(f32);
 
-/// Recompute every cloaked unit's [`DetectedBy`] mask: bit `t` is set
-/// while any living unit of owner `t` or of one of its allies with FBI
-/// `RadarDistance > 0` (Assembler, Trojan, Gateway, Byte, Connection,
-/// Worm, … — tagged [`Detector`] by `bookkeeping::tag_unit_kinds`) is
-/// within that distance and hostile to the cloaked unit.
+/// Which owners' allyteams currently have a unit in their line of sight
+/// or on their radar (`unit->losStatus[allyteam]`: `LOS_INLOS` /
+/// `LOS_INRADAR`). Bit `t` is owner `t`; an ally's sight counts for
+/// every ally ([`Alliances::vision_mask`]). A weapon may only target
+/// what its own team has in either (`CWeapon::TestTarget`,
+/// `Weapon.cpp:1039-1040`); a radar-only contact is aimed at a drifting
+/// point and ranks far below what is seen.
 ///
-/// Runs for every team independently of [`FogEnabled`] — it feeds
-/// combat targeting, not just the player's rendering. Throttled to
-/// [`VISIBILITY_REFRESH_INTERVAL`]; detector positions come from the
-/// spatial snapshot (at most one sim tick stale).
-#[allow(clippy::type_complexity)]
+/// Refreshed by [`update_cloak_detection`]. A cloaked unit is never in an
+/// enemy's line of sight (`LosHandler.cpp:879-883`), only on radar.
+/// The default (a unit that has not been scanned yet) is "seen by
+/// everyone": a fresh unit triggers a scan on the tick it appears, so
+/// the default is never read.
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SightedBy {
+    pub los: u64,
+    pub radar: u64,
+}
+
+impl Default for SightedBy {
+    fn default() -> Self {
+        Self {
+            los: u64::MAX,
+            radar: 0,
+        }
+    }
+}
+
+/// Elmos a unit of sight `distance` sees: `losMipLevel = 1` squares of
+/// 16 elmos (`(distance / 8) >> 1` of them): a sight of 300 is 288.
+pub fn los_radius(distance: f32) -> f32 {
+    ((distance / 8.0).floor() / 2.0).floor() * 16.0
+}
+
+/// Elmos a radar of `distance` covers: `radarMipLevel = 2` squares of 32
+/// elmos (`ModInfo.cpp:119`): a radar of 500 covers 480.
+pub fn radar_radius(distance: f32) -> f32 {
+    ((distance / 8.0).floor() / 4.0).floor() * 32.0
+}
+
+/// `defBaseRadarErrorSize` (`LosHandler.h:319`): how far off a radar
+/// contact's apparent position can be, in elmos.
+pub const RADAR_ERROR: f32 = 96.0;
+
+/// Where a radar-only contact at `pos` appears to be on `frame`: a
+/// drifting offset of up to [`RADAR_ERROR`] elmos, new every slow update
+/// (`Unit::UpdatePosErrorParams`; `GetUnitPositionWithError`). Hashed
+/// from the position and the update count, so every peer aims at the
+/// same point.
+pub fn radar_blip(pos: Vec3, frame: u64) -> Vec3 {
+    let mut h = (u64::from(pos.x.to_bits()) << 32 | u64::from(pos.z.to_bits()))
+        ^ (frame / u64::from(crate::sim::SLOW_UPDATE_RATE)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    let mut next = || {
+        // splitmix64
+        h = h.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = h;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^= z >> 31;
+        // [-1, 1)
+        (z >> 40) as f32 / (1u64 << 23) as f32 - 1.0
+    };
+    let (dx, dz) = (next(), next());
+    pos + Vec3::new(dx, 0.0, dz) * RADAR_ERROR
+}
+
+/// Recompute every unit's [`SightedBy`] — who has it in line of sight
+/// and who has it on radar — and the [`DetectedBy`] mask of each cloaked
+/// one (its radar coverage).
+///
+/// Every unit sees out to its FBI `SightDistance` ([`los_radius`]); the
+/// units with an active radar ([`Detector`]: Assembler, Trojan,
+/// Gateway; not while stunned) cover [`radar_radius`] around them. A
+/// building under construction has no sensors. Each sees for its whole
+/// ally team.
+///
+/// Runs for every team independently of [`FogEnabled`] — it feeds combat
+/// targeting, not just the player's rendering. Throttled to
+/// [`VISIBILITY_REFRESH_INTERVAL`], and run at once when a unit appears;
+/// positions come from the spatial snapshot (at most one sim tick stale).
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub fn update_cloak_detection(
     time: Res<Time>,
     mut timer: ResMut<CloakDetectionTimer>,
     spatial: Res<crate::units::spatial::SpatialIndex>,
-    detectors_q: Query<(&TeamId, &Detector, &GlobalTransform), Without<Dying>>,
+    unit_registry: Res<UnitRegistry>,
+    viewers_q: Query<
+        (
+            &TeamId,
+            &UnitType,
+            &Transform,
+            Option<&Detector>,
+            Has<crate::units::combat::Stunned>,
+        ),
+        (
+            Without<Dying>,
+            Without<crate::units::lifecycle::spawning::Emerging>,
+        ),
+    >,
+    mut sighted_q: Query<(Entity, &TeamId, &mut SightedBy)>,
     mut cloaked_q: Query<(Entity, &mut DetectedBy), With<Cloaked>>,
+    fresh: Query<(), Added<UnitType>>,
     alliances: Res<Alliances>,
     // Retained across frames so the refresh tick doesn't reallocate;
     // cleared on every scan and only looked up (the OR is commutative).
-    mut detected: Local<EntityHashMap<u64>>,
+    mut seen: Local<EntityHashMap<(u64, u64)>>,
 ) {
-    timer.0 += time.delta_secs();
-    if timer.0 < VISIBILITY_REFRESH_INTERVAL {
-        return;
+    if fresh.is_empty() {
+        timer.0 += time.delta_secs();
+        if timer.0 < VISIBILITY_REFRESH_INTERVAL {
+            return;
+        }
     }
     timer.0 = 0.0;
 
-    // Invert the scan: instead of testing every cloaked unit against
-    // every detector, radius-query the shared spatial index once per
-    // detector and OR its ally team's bits into each hostile cloaked
-    // entry.
-    detected.clear();
-    for (team, detector, gtf) in &detectors_q {
-        let radar = detector.radius;
-        let dp = gtf.translation();
+    // Invert the scan: instead of testing every unit against every
+    // viewer, radius-query the shared spatial index once per viewer and
+    // OR its ally team's bits into each hostile entry in reach.
+    seen.clear();
+    for (team, unit, tf, detector, stunned) in &viewers_q {
         let bit = alliances.vision_mask(team.0);
-        spatial.query_radius(dp, radar, |candidate| {
-            if candidate.cloaked
-                && !alliances.friendly(candidate.team, team.0)
-                && candidate.pos.distance_squared(dp) <= radar * radar
+        let vp = tf.translation;
+        let sight = los_radius(unit_registry.sight_distance(unit.0));
+        spatial.query_radius(vp, sight, |candidate| {
+            // A cloaked unit is never in an enemy's sight.
+            if candidate.feature
+                || candidate.cloaked
+                || alliances.friendly(candidate.team, team.0)
+                || candidate.pos.distance_squared(vp) > sight * sight
             {
-                *detected.entry(candidate.entity).or_default() |= bit;
+                return;
+            }
+            seen.entry(candidate.entity).or_default().0 |= bit;
+        });
+        // A stunned unit's sensors are off (`LosHandler.cpp:182-186`).
+        let Some(detector) = detector.filter(|_| !stunned) else {
+            continue;
+        };
+        let radar = radar_radius(detector.radius);
+        spatial.query_radius(vp, radar, |candidate| {
+            if !candidate.feature
+                && !alliances.friendly(candidate.team, team.0)
+                && candidate.pos.distance_squared(vp) <= radar * radar
+            {
+                seen.entry(candidate.entity).or_default().1 |= bit;
             }
         });
     }
 
+    for (entity, team, mut sighted) in &mut sighted_q {
+        let (los, radar) = seen.get(&entity).copied().unwrap_or((0, 0));
+        let next = SightedBy {
+            // A unit is always in its own allyteam's sight.
+            los: los | alliances.vision_mask(team.0),
+            radar,
+        };
+        if *sighted != next {
+            *sighted = next;
+        }
+    }
     for (entity, mut mask) in &mut cloaked_q {
-        let next = DetectedBy(detected.get(&entity).copied().unwrap_or(0));
+        let next = DetectedBy(seen.get(&entity).map_or(0, |s| s.1));
         if *mask != next {
             *mask = next;
         }
@@ -382,7 +486,14 @@ pub fn update_fog_visibility(
     alliances: Res<Alliances>,
     unit_registry: Res<UnitRegistry>,
     spatial: Res<crate::units::spatial::SpatialIndex>,
-    viewers_q: Query<(&TeamId, &UnitType, &GlobalTransform), Without<Dying>>,
+    // A building under construction has no sight (`LosHandler.cpp:173`).
+    viewers_q: Query<
+        (&TeamId, &UnitType, &GlobalTransform),
+        (
+            Without<Dying>,
+            Without<crate::units::lifecycle::spawning::Emerging>,
+        ),
+    >,
     mut targets_q: Query<
         (
             Entity,
@@ -567,9 +678,12 @@ mod tests {
                 team,
                 kind,
                 hp_positive: true,
+                health: 1000.0,
+                armored: false,
                 is_flying: false,
                 cloaked: false,
                 detected_by: 0,
+                los_by: u64::MAX,
                 feature: false,
             });
             e
@@ -655,5 +769,110 @@ mod tests {
             .0;
         assert_eq!(*handle, shared);
         assert!(world.get::<CloakFadeMaterials>(unit).is_none());
+    }
+
+    /// The engine rounds sight to 16-elmo and radar to 32-elmo squares.
+    #[test]
+    fn sensor_radii_follow_the_los_squares() {
+        assert_eq!(los_radius(300.0), 288.0);
+        assert_eq!(radar_radius(500.0), 480.0);
+        assert_eq!(radar_radius(200.0), 192.0);
+    }
+
+    /// A radar blip stays within the error radius, is the same for
+    /// every peer, and moves on each slow update.
+    #[test]
+    fn radar_blip_drifts_within_the_error_radius() {
+        let at = Vec3::new(120.0, 4.0, 700.0);
+        let blip = |frame| radar_blip(at, frame);
+        for frame in [0u64, 14, 15, 90, 1000] {
+            let off = blip(frame) - at;
+            assert!(off.x.abs() <= RADAR_ERROR && off.z.abs() <= RADAR_ERROR);
+            assert_eq!(off.y, 0.0);
+            assert_eq!(blip(frame), blip(frame), "deterministic");
+        }
+        assert_eq!(blip(0), blip(14), "one offset per slow update");
+        assert_ne!(blip(0), blip(15));
+    }
+
+    /// Who has a unit in sight and who on radar: sight reaches
+    /// `los_radius`, a cloaked unit is never in an enemy's sight, an
+    /// active radar covers what sight does not — cloaked or not — and a
+    /// unit is always in its own team's sight.
+    #[test]
+    fn sight_and_radar_masks() {
+        use crate::units::content::definitions::UnitKind;
+        use crate::units::spatial::{SpatialEntry, SpatialIndex};
+        let mut world = World::new();
+        world.init_resource::<Time>();
+        world.init_resource::<CloakDetectionTimer>();
+        world.insert_resource(Alliances::from_seats([(0, 0), (1, 1)]));
+        let registry = UnitRegistry::load();
+        let sight = los_radius(registry.sight_distance(UnitKind::Kernel));
+        let asm_sight = los_radius(registry.sight_distance(UnitKind::Assembler));
+        let asm_radar = radar_radius(registry.radar_distance(UnitKind::Assembler));
+        assert!(sight > 0.0 && asm_radar > asm_sight + 60.0);
+        let mut spatial = SpatialIndex::default();
+        let mut unit = |world: &mut World, kind: UnitKind, team: u8, x: f32, cloaked: bool| {
+            let mut e = world.spawn((
+                UnitType(kind),
+                TeamId(team),
+                Transform::from_xyz(x, 0.0, 0.0),
+            ));
+            if cloaked {
+                e.insert(Cloaked);
+            }
+            if kind.activates_radar() {
+                e.insert(Detector {
+                    radius: registry.radar_distance(kind),
+                });
+            }
+            let e = e.id();
+            spatial.insert_for_test(SpatialEntry {
+                entity: e,
+                pos: Vec3::new(x, 0.0, 0.0),
+                hit_radius: 10.0,
+                mid_y: 0.0,
+                up: Vec3::Y,
+                team,
+                kind,
+                hp_positive: true,
+                health: 1000.0,
+                armored: false,
+                is_flying: false,
+                cloaked,
+                detected_by: 0,
+                los_by: u64::MAX,
+                feature: false,
+            });
+            e
+        };
+        let kernel = unit(&mut world, UnitKind::Kernel, 0, 0.0, false);
+        let near = unit(&mut world, UnitKind::Bit, 1, sight - 20.0, false);
+        let far = unit(&mut world, UnitKind::Bit, 1, sight + 200.0, false);
+        let mine = unit(&mut world, UnitKind::LogicBomb, 1, 50.0, true);
+        // An Assembler far away at x = 5000 with a plain enemy just
+        // beyond its sight and a mine inside its radar.
+        let asm = unit(&mut world, UnitKind::Assembler, 0, 5000.0, false);
+        let blip = unit(&mut world, UnitKind::Bit, 1, 5000.0 + asm_sight + 60.0, false);
+        let buried = unit(&mut world, UnitKind::LogicBomb, 1, 5000.0 + asm_sight + 60.0, true);
+        world.insert_resource(registry);
+        world.insert_resource(spatial);
+        world.run_system_once(update_cloak_detection).unwrap();
+        let masks = |world: &World, e| {
+            let s = world.get::<SightedBy>(e).unwrap();
+            (s.los & 1 != 0, s.radar & 1 != 0)
+        };
+        assert_eq!(masks(&world, kernel), (true, false), "own unit");
+        assert_eq!(masks(&world, asm), (true, false), "own unit");
+        assert_eq!(masks(&world, near), (true, false), "inside sight");
+        assert_eq!(masks(&world, far), (false, false), "beyond sight");
+        assert_eq!(masks(&world, mine), (false, false), "cloaked is never seen");
+        assert_eq!(masks(&world, blip), (false, true), "radar only");
+        assert_eq!(masks(&world, buried), (false, true), "radar shows the cloaked");
+        assert!(world.get::<DetectedBy>(buried).unwrap().contains(0));
+        assert!(!world.get::<DetectedBy>(mine).unwrap().contains(0));
+        // The other team has its own unit in its own sight.
+        assert!(world.get::<SightedBy>(near).unwrap().los & 2 != 0);
     }
 }

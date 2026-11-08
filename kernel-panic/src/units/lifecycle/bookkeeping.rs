@@ -51,7 +51,9 @@ pub struct IdleAutoHeal {
     pub always: f32,
 }
 
-/// FBI `RadarDistance > 0`: reveals cloaked enemies within `radius`.
+/// An active radar (FBI `RadarDistance > 0` on a unit whose script
+/// activates it): puts every enemy within `radius` on the radar of its
+/// ally team, cloaked ones included.
 #[derive(Component, Clone, Copy, Debug)]
 pub struct Detector {
     pub radius: f32,
@@ -102,7 +104,7 @@ pub fn tag_unit_kinds(
             });
         }
         let radar = unit_registry.radar_distance(kind);
-        if radar > 0.0 {
+        if radar > 0.0 && kind.activates_radar() {
             entity.insert(Detector { radius: radar });
         }
         let seismic = unit_registry.seismic_distance(kind);

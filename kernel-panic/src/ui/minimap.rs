@@ -14,12 +14,18 @@
 //! children for every dot) avoids per-frame UI tree churn for what is
 //! a quintessentially raster overlay.
 
+use crate::sim::DetFloat;
 use bevy::asset::RenderAssetUsages;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+use bevy::ui::RelativeCursorPosition;
 
-use crate::rendering::camera::{RtsCamera, intersect_ground_y};
+use crate::interaction::selection::Selected;
+use crate::rendering::camera::{MapBounds, RtsCamera, RtsCameraState, intersect_ground_y};
+use crate::units::combat::Dying;
+use crate::units::components::{TeamId, UnitType};
 use crate::units::mechanics::cloak::Spotted;
+use crate::units::player::LocalTeam;
 use crate::units::team_colors::UnitColor;
 
 use super::theme::PANEL_BORDER;
@@ -35,13 +41,164 @@ pub struct MinimapPlugin;
 
 impl Plugin for MinimapPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(
-            Update,
-            (
-                update_minimap.run_if(resource_exists::<MinimapState>),
-                show_minimap_in_game,
-            ),
-        );
+        app.init_resource::<MinimapPointer>()
+            .init_resource::<MinimapDrag>()
+            .add_systems(
+                // After the panel and the build bar had their press (their
+                // buttons are drawn over the minimap's corner), before
+                // selection and the camera see what is left.
+                PreUpdate,
+                minimap_mouse_input
+                    .after(bevy::input::InputSystems)
+                    .after(bevy::ui::UiSystems::Focus)
+                    .after(super::hud::command_panel::PanelMouseInput),
+            )
+            .add_systems(
+                Update,
+                (
+                    update_minimap.run_if(resource_exists::<MinimapState>),
+                    show_minimap_in_game,
+                ),
+            );
+    }
+}
+
+/// Where on the map the cursor points while it is over the minimap
+/// (x, z in elmos). Orders, ability targets and unit picks take this
+/// point instead of the 3-D view behind the minimap, as Spring's
+/// `CMiniMap` proxies mouse presses (`MiniMapFullProxy`).
+#[derive(Resource, Default, Clone, Copy, Debug)]
+pub struct MinimapPointer {
+    pub world: Option<Vec2>,
+}
+
+/// A left press on the minimap that is still held: where it started
+/// (normalised minimap coordinates), to tell a click from a box.
+#[derive(Resource, Default)]
+pub struct MinimapDrag {
+    left: Option<Vec2>,
+    middle: bool,
+}
+
+/// Pixels the cursor may move before a minimap press is a box.
+const BOX_THRESHOLD_PX: f32 = 4.0;
+/// How near a click must land to pick a unit (minimap pixels; the
+/// engine's `unitSelectRadius`).
+const PICK_RADIUS_PX: f32 = 6.0;
+
+/// The minimap's mouse input (`CMiniMap::MousePress`): left selects the
+/// nearest own unit or drags a box, middle moves the camera. Right
+/// presses and armed-order clicks reach their handlers as usual and find
+/// the map point through [`MinimapPointer`].
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn minimap_mouse_input(
+    state: Option<Res<MinimapState>>,
+    app_state: Res<State<crate::game_setup::AppState>>,
+    nodes: Query<(&RelativeCursorPosition, &ComputedNode), With<MinimapNode>>,
+    mut pointer: ResMut<MinimapPointer>,
+    mut drag: ResMut<MinimapDrag>,
+    mut mouse: ResMut<ButtonInput<MouseButton>>,
+    keys: Res<ButtonInput<KeyCode>>,
+    modes: Res<crate::interaction::ability::OrderCursorModes>,
+    local: Res<LocalTeam>,
+    bounds: Option<Res<MapBounds>>,
+    units: Query<(Entity, &Transform, &TeamId), (With<UnitType>, Without<Dying>)>,
+    selected: Query<Entity, With<Selected>>,
+    mut cameras: Query<&mut RtsCameraState>,
+    mut commands: Commands,
+) {
+    let over = nodes
+        .iter()
+        .find(|(rel, _)| rel.cursor_over)
+        .filter(|_| *app_state.get() == crate::game_setup::AppState::InGame);
+    let (Some(state), Some((rel, node))) = (state, over) else {
+        pointer.world = None;
+        // The mouse left the minimap: a held press ends with it.
+        if !mouse.pressed(MouseButton::Left) {
+            drag.left = None;
+        }
+        if !mouse.pressed(MouseButton::Middle) {
+            drag.middle = false;
+        }
+        return;
+    };
+    // Normalised 0..1 across the node (the border is part of it).
+    let Some(norm) = rel.normalized.map(|n| n + Vec2::splat(0.5)) else {
+        pointer.world = None;
+        return;
+    };
+    let world = Vec2::new(norm.x * state.world_width, norm.y * state.world_depth);
+    pointer.world = Some(world);
+    // Logical pixels the node spans, and elmos per logical pixel.
+    let size = node.size() * node.inverse_scale_factor();
+    let px_to_world = Vec2::new(
+        state.world_width / size.x.det_max(1.0),
+        state.world_depth / size.y.det_max(1.0),
+    );
+
+    // Middle: the camera goes there, and follows a held press.
+    if mouse.just_pressed(MouseButton::Middle) {
+        drag.middle = true;
+        mouse.clear_just_pressed(MouseButton::Middle);
+    }
+    if drag.middle && mouse.pressed(MouseButton::Middle) {
+        for mut cam in &mut cameras {
+            let target = Vec3::new(world.x, cam.focus.y, world.y);
+            cam.focus = bounds.as_ref().map_or(target, |b| b.clamp_focus(target));
+        }
+    }
+
+    // Left: an armed order mode's click is the mode's (it reads the
+    // point from the pointer); otherwise a click picks, a drag boxes.
+    if modes.any_active() {
+        return;
+    }
+    if mouse.just_pressed(MouseButton::Left) {
+        drag.left = Some(norm);
+        mouse.clear_just_pressed(MouseButton::Left);
+    }
+    if mouse.just_released(MouseButton::Left)
+        && let Some(start) = drag.left.take()
+    {
+        let add = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+        let moved = ((norm - start) * size).length();
+        let own = |team: &TeamId| team.0 == local.0;
+        let mut chosen: Vec<Entity> = Vec::new();
+        if moved > BOX_THRESHOLD_PX {
+            let lo = start.min(norm) * Vec2::new(state.world_width, state.world_depth);
+            let hi = start.max(norm) * Vec2::new(state.world_width, state.world_depth);
+            for (entity, t, team) in &units {
+                let p = Vec2::new(t.translation.x, t.translation.z);
+                if own(team) && p.cmpge(lo).all() && p.cmple(hi).all() {
+                    chosen.push(entity);
+                }
+            }
+        } else {
+            let radius = px_to_world * PICK_RADIUS_PX;
+            let reach = radius.x.det_max(radius.y);
+            let nearest = units
+                .iter()
+                .filter(|(_, _, team)| own(team))
+                .map(|(e, t, _)| {
+                    (
+                        e,
+                        Vec2::new(t.translation.x, t.translation.z).distance(world),
+                    )
+                })
+                .filter(|(_, d)| *d <= reach)
+                .min_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
+            chosen.extend(nearest.map(|(e, _)| e));
+        }
+        if !add {
+            for entity in &selected {
+                if !chosen.contains(&entity) {
+                    commands.entity(entity).remove::<Selected>();
+                }
+            }
+        }
+        for entity in chosen {
+            commands.entity(entity).insert(Selected);
+        }
     }
 }
 
@@ -143,6 +300,8 @@ pub fn setup_minimap(
         BorderColor::all(PANEL_BORDER),
         BackgroundColor(Color::BLACK),
         ImageNode::new(image_handle.clone()),
+        // Where the cursor is on it (`minimap_mouse_input`).
+        RelativeCursorPosition::default(),
         // Behind the HUD widgets (`hud_root`'s -1): where the command
         // panel reaches up over it in a short window, the buttons are on
         // top, as Spring draws its `CGuiHandler` (a FRONT input receiver)

@@ -120,13 +120,16 @@ pub fn process_deploy(
             &Transform,
             &Health,
             Has<Selected>,
+            Option<&crate::units::combat::Infected>,
         ),
         Without<Dying>,
     >,
+    mut virus_spawns: ResMut<crate::units::combat::VirusSpawnQueue>,
     mut ctx: SpawnContext,
 ) {
     for event in events.read() {
-        let Ok((unit, faction, team, transform, health, selected)) = query.get(event.entity) else {
+        let Ok((unit, faction, team, transform, health, selected, infected)) = query.get(event.entity)
+        else {
             continue;
         };
         if health.current <= 0.0 {
@@ -145,6 +148,15 @@ pub fn process_deploy(
         // The pair is spawned in its place; the source skips `Dying`,
         // but its counters' marker hooks run on the despawn itself.
         ctx.commands.entity(event.entity).despawn();
+        // `UnitDestroyed` runs for the swapped-out unit too: an infected
+        // Bug or Exploit releases its Virus (infection.lua).
+        if let Some(infected) = infected {
+            virus_spawns.push(crate::units::combat::VirusSpawn {
+                position: transform.translation,
+                faction: infected.attacker_faction,
+                team: infected.attacker_team,
+            });
+        }
 
         let spawned = spawn_unit(
             target_kind,

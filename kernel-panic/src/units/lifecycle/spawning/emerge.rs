@@ -50,6 +50,60 @@ pub enum EmergeStyle {
     Fade,
 }
 
+/// A unit under construction is a unit with health of its own
+/// (`CUnit::PreInit`: `health = beingBuilt ? 0.1 : maxHealth`; each build
+/// step adds `maxHealth · step`, decay takes it back, `Unit.cpp:2016`,
+/// `:1038`): a nanoframe is only as sturdy as it is built, and what hits
+/// it is lost for good. `last` is the build progress already paid out in
+/// health.
+#[derive(Component, Debug)]
+#[component(storage = "SparseSet")]
+pub struct BuildHealth {
+    last: f32,
+}
+
+/// Tie the health of every [`Emerging`] unit to its build progress, and
+/// let go of the ones that are finished.
+#[allow(clippy::type_complexity)]
+pub fn buildee_health(
+    mut building: Query<(
+        Entity,
+        &Emerging,
+        &mut crate::units::components::Health,
+        Option<&mut BuildHealth>,
+    )>,
+    finished: Query<Entity, (With<BuildHealth>, Without<Emerging>)>,
+    mut commands: Commands,
+) {
+    for (entity, emerging, mut health, paid) in &mut building {
+        let progress = if emerging.total > 0.0 {
+            (1.0 - emerging.remaining / emerging.total).det_clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        match paid {
+            None => {
+                // Spawned at full health; a buildee starts at 0.1 plus
+                // what is already built.
+                health.current = health.current.det_min(0.1 + progress * health.max);
+                commands
+                    .entity(entity)
+                    .try_insert(BuildHealth { last: progress });
+            }
+            Some(mut paid) => {
+                let step = progress - paid.last;
+                paid.last = progress;
+                if step != 0.0 && health.current > 0.0 {
+                    health.current = (health.current + health.max * step).det_clamp(0.1, health.max);
+                }
+            }
+        }
+    }
+    for entity in &finished {
+        commands.entity(entity).try_remove::<BuildHealth>();
+    }
+}
+
 /// An [`Emerging`] unit whose build clock its builder drives (Spring's
 /// `AddBuildPower`): `emerge_system` leaves `remaining` alone and only
 /// applies it, so the build stalls when the builder does — and
@@ -254,5 +308,43 @@ mod tests {
                 QueuedCommand::Patrol(a),
             ]
         );
+    }
+
+    /// A buildee starts at 0.1 HP and gains `maxHealth · step` per build
+    /// step; damage it takes stays lost, and the bookkeeping goes with
+    /// `Emerging`.
+    #[test]
+    fn a_buildee_gains_health_with_its_progress() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        let unit = world
+            .spawn((
+                Emerging {
+                    target_y: 0.0,
+                    remaining: 10.0,
+                    total: 10.0,
+                    rally_point: None,
+                    rally_then: None,
+                    style: EmergeStyle::Rise,
+                },
+                crate::units::components::Health::full(1000.0),
+            ))
+            .id();
+        let hp = |world: &World| world.get::<crate::units::components::Health>(unit).unwrap().current;
+        world.run_system_once(buildee_health).unwrap();
+        assert!((hp(&world) - 0.1).abs() < 1e-3, "starts at 0.1");
+        world.get_mut::<Emerging>(unit).unwrap().remaining = 5.0;
+        world.run_system_once(buildee_health).unwrap();
+        assert!((hp(&world) - 500.1).abs() < 1e-2, "half built, half the health");
+        world
+            .get_mut::<crate::units::components::Health>(unit)
+            .unwrap()
+            .current -= 200.0;
+        world.get_mut::<Emerging>(unit).unwrap().remaining = 0.0;
+        world.run_system_once(buildee_health).unwrap();
+        assert!((hp(&world) - 800.1).abs() < 1e-2, "the damage stays");
+        world.entity_mut(unit).remove::<Emerging>();
+        world.run_system_once(buildee_health).unwrap();
+        assert!(world.get::<BuildHealth>(unit).is_none());
     }
 }

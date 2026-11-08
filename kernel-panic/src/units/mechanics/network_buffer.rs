@@ -398,16 +398,28 @@ fn dispatch_spot_free(
 
 /// Drain `EnterEvent`s — absorb Packets that are close to a
 /// friendly teleporter and have finished their post-dispatch stun.
+#[allow(clippy::type_complexity)]
 pub fn process_enter(
     mut events: MessageReader<EnterEvent>,
-    packets: Query<(&UnitType, &TeamId, &Transform, Option<&PacketSpawnStun>), Without<Dying>>,
+    packets: Query<
+        (
+            &UnitType,
+            &TeamId,
+            &Transform,
+            Option<&PacketSpawnStun>,
+            Option<&crate::units::combat::Infected>,
+        ),
+        Without<Dying>,
+    >,
     teleporters: Query<(&UnitType, &TeamId, &Transform), Without<Dying>>,
     mut buffer: ResMut<PacketBuffer>,
+    mut virus_spawns: ResMut<crate::units::combat::VirusSpawnQueue>,
     mut commands: Commands,
 ) {
     let enter_sq = ENTER_DISTANCE * ENTER_DISTANCE;
     for event in events.read() {
-        let Ok((packet_unit, packet_team, packet_tf, stun)) = packets.get(event.packet) else {
+        let Ok((packet_unit, packet_team, packet_tf, stun, infected)) = packets.get(event.packet)
+        else {
             continue;
         };
         if packet_unit.0 != UnitKind::Packet || stun.is_some() {
@@ -423,6 +435,15 @@ pub fn process_enter(
             buffer.add(packet_team.0, 1);
             // Absorbed, not killed: no `Dying`, but
             // its counters' marker hooks run on the despawn itself.
+            // infection.lua's `UnitDestroyed` fires for any removal, so
+            // an infected Packet still releases its Virus in the port.
+            if let Some(infected) = infected {
+                virus_spawns.push(crate::units::combat::VirusSpawn {
+                    position: packet_tf.translation,
+                    faction: infected.attacker_faction,
+                    team: infected.attacker_team,
+                });
+            }
             commands.entity(event.packet).despawn();
         }
     }

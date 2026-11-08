@@ -33,7 +33,7 @@ pub mod units;
 #[cfg(kani)]
 mod proofs;
 
-use crate::sim::{DetFloat, sq};
+use crate::sim::sq;
 use bevy::prelude::*;
 
 use crate::interaction::movement::{MovePath, MoveTarget};
@@ -743,10 +743,6 @@ pub struct AnimFxOut<'w, 's> {
     /// A builder clearing a feature off its site: the strand ends on the
     /// feature (`network_arceffect.lua` draws it for that order too).
     pub clearing: Query<'w, 's, &'static crate::units::lifecycle::construction::ClearingFeature>,
-    pub commands: Commands<'w, 's>,
-    pub meshes: ResMut<'w, Assets<Mesh>>,
-    pub materials: ResMut<'w, Assets<StandardMaterial>>,
-    pub death_assets: ResMut<'w, DeathParticleAssets>,
     pub explosions: ResMut<'w, PendingExplosions>,
     /// Exploded pieces for [`debris::spawn_debris`] to throw.
     pub debris: ResMut<'w, debris::PendingDebris>,
@@ -981,15 +977,8 @@ fn apply_and_drain(
                     unit: entity,
                     flags,
                 });
-                let piece_world_pos = piece_world_pos(fx, rig.piece_entities[piece], unit_gtf);
-                spawn_death_particle(
-                    piece_world_pos,
-                    color,
-                    &mut fx.death_assets,
-                    &mut fx.commands,
-                    &mut fx.meshes,
-                    &mut fx.materials,
-                );
+                // Spring draws no sphere for an exploded piece: the debris
+                // flies, and the unit's `ExplodeAs` weapon does the rest.
             }
             FxEvent::Emit {
                 piece,
@@ -1162,107 +1151,6 @@ fn dispatch_emit_sfx(
         ceg: None,
         damage: 0.0,
     });
-}
-
-// ---------------------------------------------------------------------------
-// Death particle effects
-// ---------------------------------------------------------------------------
-
-/// Brief particle burst spawned when a piece explodes.
-#[derive(Component)]
-pub struct DeathParticle {
-    pub lifetime: f32,
-    pub max_lifetime: f32,
-}
-
-/// Lazily-populated shared mesh and per-owner-colour emissive materials for
-/// death particles. `spawn_death_particle` seeds the entry the first time
-/// it needs a given owner color; every subsequent particle re-uses the
-/// same Handle. Mirrors the pattern used by `BuildSparkleAssets` /
-/// `ImpactBurstAssets`.
-#[derive(Resource, Default)]
-pub struct DeathParticleAssets {
-    pub mesh: Option<Handle<Mesh>>,
-    pub by_color: std::collections::HashMap<TeamColor, Handle<StandardMaterial>>,
-}
-
-impl DeathParticleAssets {
-    fn material_for(
-        &mut self,
-        color: TeamColor,
-        materials: &mut Assets<StandardMaterial>,
-    ) -> Handle<StandardMaterial> {
-        self.by_color
-            .entry(color)
-            .or_insert_with(|| {
-                let color = LinearRgba::from(color.color());
-                materials.add(StandardMaterial {
-                    base_color: Color::from(color),
-                    emissive: color * 6.0,
-                    unlit: true,
-                    alpha_mode: AlphaMode::Add,
-                    ..default()
-                })
-            })
-            .clone()
-    }
-}
-
-/// Spawn a brief expanding, fading burst at `pos` in the unit's owner color.
-///
-/// Mesh and per-colour material are owned by [`DeathParticleAssets`] so
-/// every burst reuses the same Handle — an arena full of dying units
-/// doesn't each mint a fresh sphere and material asset.
-fn spawn_death_particle(
-    pos: Vec3,
-    color: TeamColor,
-    assets: &mut DeathParticleAssets,
-    commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    materials: &mut Assets<StandardMaterial>,
-) {
-    let mesh = assets
-        .mesh
-        .get_or_insert_with(|| meshes.add(Sphere::new(1.0).mesh().ico(2).unwrap()))
-        .clone();
-    let material = assets.material_for(color, materials);
-
-    commands.spawn((
-        DeathParticle {
-            lifetime: 0.0,
-            max_lifetime: 0.5,
-        },
-        Mesh3d(mesh),
-        MeshMaterial3d(material),
-        Transform::from_translation(pos).with_scale(Vec3::splat(2.0)),
-    ));
-}
-
-/// Expand and fade death particles, then despawn them. The shared
-/// material means we can't mutate alpha per-particle, so "fade" is done
-/// purely through the scale curve — the sphere grows, peaks, then
-/// shrinks back to zero in the last ~20% of its life, disappearing
-/// cleanly. The material itself stays at full emissive.
-pub fn decay_death_particles(
-    time: Res<Time>,
-    mut query: Query<(Entity, &mut DeathParticle, &mut Transform)>,
-    mut commands: Commands,
-) {
-    let dt = time.delta_secs();
-    for (entity, mut particle, mut transform) in &mut query {
-        particle.lifetime += dt;
-        let t = (particle.lifetime / particle.max_lifetime).det_clamp(0.0, 1.0);
-
-        if t >= 1.0 {
-            commands.entity(entity).despawn();
-            continue;
-        }
-
-        // Grow then shrink: peaks at t=0.8, collapses to zero by t=1.0.
-        let peak_scale = 2.0 + 20.0 * t.det_min(0.8) / 0.8;
-        let tail = if t > 0.8 { (1.0 - t) / 0.2 } else { 1.0 };
-        transform.scale = Vec3::splat(peak_scale * tail);
-    }
 }
 
 #[cfg(test)]

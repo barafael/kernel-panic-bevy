@@ -1502,11 +1502,15 @@ pub fn step_mover(
     let delta = change_speed(m, fs, wanted_speed, &inputs);
     // `CalcSpeedVectorExclGravity`: a speed above the maximum (an
     // impulse along the facing) decays through rolling resistance.
-    let base_speed = if m.current_speed > fs.max_speed {
+    // The engine builds the next speed from `owner->speed.w`, the 3-D
+    // magnitude of the last velocity, while `currentSpeed` (what
+    // `ChangeSpeed` regulates) is its horizontal part.
+    let speed_w = m.velocity.length();
+    let base_speed = if speed_w > fs.max_speed {
         let drag = drag_acceleration(m.velocity, m.mass, true, ROLLING_RESISTANCE_COEFF);
         fs.max_speed.det_max((m.velocity + drag).length())
     } else {
-        m.current_speed
+        speed_w
     };
     let new_speed = (base_speed + delta).det_max(0.0);
     // `owner->frontdir * speed`: the heading tilted onto the ground,
@@ -1536,7 +1540,9 @@ pub fn step_mover(
             step = request;
         }
     }
-    m.current_speed = new_speed;
+    // `currentSpeed = newSpeedVector.dot(flatFrontDir)`: the horizontal
+    // part (`GroundMoveType.cpp:3509-3510`).
+    m.current_speed = m.velocity.xz().length();
 
     // --- UpdatePreCollisions: Arrived / Fail ---
     let finished = if m.pathing_arrived {
@@ -3390,7 +3396,8 @@ mod tests {
             (v.y / v.x - ops::tan(30.0_f32.to_radians())).abs() < 0.05,
             "{v}"
         );
-        assert!((v.length() - m.current_speed).abs() < 1e-3, "{v}");
+        // `currentSpeed` is the horizontal part of the 3-D velocity.
+        assert!((v.xz().length() - m.current_speed).abs() < 1e-3, "{v}");
     }
 
     /// `CanApplyImpulse`: an impulse along the facing only adds speed,
@@ -3796,7 +3803,11 @@ mod tests {
         let slope = 1.0 - ops::cos(30.0_f32.to_radians());
         let expected = 90.0 / (1.0 + slope * spring_pathfinding::slope_mod_from_max_slope(cap));
         assert!((up - expected).abs() < 2.0, "uphill {up} vs {expected}");
-        assert!((down - 90.0).abs() < 0.5, "downhill full speed: {down}");
+        // Downhill the rolling resistance above `maxSpeed` settles the
+        // ground speed at `max · cos / (0.05 + cos)` (~0.945 of it at 30°).
+        let cos = ops::cos(30.0_f32.to_radians());
+        let downhill = 90.0 * cos / (0.05 + cos);
+        assert!((down - downhill).abs() < 0.5, "downhill {down} vs {downhill}");
     }
 
     /// Idle units follow sinking terrain down (Hex Farm) instead of
