@@ -186,6 +186,8 @@ pub fn tick_repair(
         (&Transform, &UnitType, &TeamId, &mut crate::units::components::Health),
         (Without<Dying>, Without<Emerging>),
     >,
+    // A nanoframe: only the builder that started it may carry on.
+    frames: Query<(&Transform, &UnitType, &TeamId, &BuildDriven), (With<Emerging>, Without<Dying>)>,
     alliances: Res<crate::units::teams::Alliances>,
     registry: Res<UnitRegistry>,
     mut commands: Commands,
@@ -201,6 +203,33 @@ pub fn tick_repair(
         };
         let Ok((target_tf, target_kind, target_team, mut health)) = targets.get_mut(order.target)
         else {
+            // `canRepairUnit &= !soloBuilder || soloBuilder == owner`:
+            // its own unfinished frame is built on, anyone else's is not
+            // repairable.
+            if let Ok((frame_tf, frame_kind, frame_team, driven)) = frames.get(order.target)
+                && driven.solo_builder == Some(builder)
+                && alliances.friendly(team.0, frame_team.0)
+            {
+                let at = frame_tf.translation;
+                let range = registry.build_range(kind.0, frame_kind.0);
+                if flat_dist_sq(tf.translation, at) > range * range {
+                    if move_target.is_none_or(|t| {
+                        t.0.distance(at) > crate::units::combat::CHASE_REPATH_DISTANCE
+                    }) {
+                        commands.entity(builder).insert(MoveTarget(at));
+                    }
+                } else {
+                    commands
+                        .entity(builder)
+                        .remove::<(RepairOrder, Repairing, MoveTarget, MovePath)>()
+                        .insert(Constructing {
+                            kind: frame_kind.0,
+                            site: at,
+                            building: Some(order.target),
+                        });
+                }
+                continue;
+            }
             done(&mut commands);
             continue;
         };
@@ -861,7 +890,10 @@ pub fn tick_construction(
                         rally_then: None,
                         style,
                     },
-                    BuildDriven::default(),
+                    BuildDriven {
+                        solo_builder: Some(entity),
+                        ..default()
+                    },
                 ));
                 if matches!(style, EmergeStyle::Fade) {
                     ctx.commands.entity(new_entity).insert(PendingFadeInstall);
@@ -1038,6 +1070,55 @@ mod tests {
         world.run_system_once(tick_repair).unwrap();
         assert!(world.get::<RepairOrder>(builder).is_none());
         assert!(world.get::<MoveTarget>(builder).is_none());
+    }
+
+    /// `CanAssist=0`: a nanoframe may be carried on only by the builder
+    /// that started it — a Repair order from it resumes the build (it
+    /// walks into range first), from anyone else it ends at once.
+    #[test]
+    fn only_the_solo_builder_resumes_a_nanoframe() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        world.init_resource::<Time>();
+        world.insert_resource(crate::units::teams::Alliances::from_seats([(0, 0)]));
+        world.insert_resource(UnitRegistry::load());
+        let owner = world
+            .spawn((UnitType(UnitKind::Assembler), TeamId(0), Transform::default()))
+            .id();
+        let frame = world
+            .spawn((
+                UnitType(UnitKind::Socket),
+                TeamId(0),
+                Transform::from_xyz(5000.0, 0.0, 0.0),
+                Emerging {
+                    target_y: 0.0,
+                    remaining: 10.0,
+                    total: 20.0,
+                    rally_point: None,
+                    rally_then: None,
+                    style: EmergeStyle::Fade,
+                },
+                BuildDriven {
+                    solo_builder: Some(owner),
+                    ..default()
+                },
+            ))
+            .id();
+        let stranger = world
+            .spawn((UnitType(UnitKind::Assembler), TeamId(0), Transform::default()))
+            .id();
+        world.entity_mut(owner).insert(RepairOrder { target: frame });
+        world.entity_mut(stranger).insert(RepairOrder { target: frame });
+        world.run_system_once(tick_repair).unwrap();
+        assert!(world.get::<MoveTarget>(owner).is_some(), "walks to it");
+        assert!(world.get::<RepairOrder>(owner).is_some());
+        assert!(world.get::<RepairOrder>(stranger).is_none(), "refused");
+        // In range: the repair turns into building the frame.
+        world.get_mut::<Transform>(owner).unwrap().translation.x = 4990.0;
+        world.run_system_once(tick_repair).unwrap();
+        let building = world.get::<Constructing>(owner).expect("building");
+        assert_eq!(building.building, Some(frame));
+        assert!(world.get::<RepairOrder>(owner).is_none());
     }
 
     /// The returned vector has unit length and lies in the XZ plane — so

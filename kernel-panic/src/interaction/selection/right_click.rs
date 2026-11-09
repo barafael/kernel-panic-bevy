@@ -322,6 +322,7 @@ fn handle_right_click(
                 selected_q.iter().map(|(e, _, u, _)| (e, u.0)),
                 target,
                 alt,
+                shift,
                 &mut net,
                 &mut commands,
             );

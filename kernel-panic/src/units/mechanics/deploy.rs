@@ -154,6 +154,7 @@ pub fn start_morph(
 pub fn tick_morph(
     time: Res<Time>,
     mut units: Query<(Entity, &mut Morphing, Option<&MorphGate>), Without<Dying>>,
+    mut animators: Query<&mut crate::units::assets::animation::UnitAnimator>,
     mut done: MessageWriter<MorphDone>,
     mut commands: Commands,
 ) {
@@ -166,6 +167,12 @@ pub fn tick_morph(
             morph.started = true;
             // `deployed=1`, `set MAX_SPEED to 1`.
             commands.entity(entity).try_insert(MorphSilenced);
+            // The script's flip starts here.
+            if let Ok(mut animator) = animators.get_mut(entity) {
+                let crate::units::assets::animation::UnitAnimator { rig, driver, .. } =
+                    &mut *animator;
+                driver.morph(rig);
+            }
         }
         // Pinned: whatever the player orders meanwhile does not move it.
         commands.entity(entity).remove::<(

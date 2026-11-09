@@ -577,6 +577,7 @@ fn bot_tick(
                     units: Units::List(ids(&targets, &units)),
                     target,
                     auto: false,
+                    queue: false,
                 });
                 bot.log(&format!("nx {} units -> {x},{z}", targets.len()));
             }
@@ -592,6 +593,7 @@ fn bot_tick(
                     units: Units::List(ids(&targets, &units)),
                     target: NetPos::quantize(hm.place(x, z)),
                     auto,
+                    queue: false,
                 });
                 bot.log(&format!(
                     "dispatch from {} teleporters -> {x},{z}{}",

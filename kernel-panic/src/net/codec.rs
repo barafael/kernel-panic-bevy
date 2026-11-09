@@ -311,6 +311,7 @@ mod tests {
             units: Units::Prev,
             target: NetPos::default(),
             auto: false,
+            queue: false,
         })
         .unwrap();
         assert_eq!(bytes[0], 13);

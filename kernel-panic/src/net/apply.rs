@@ -329,6 +329,8 @@ pub(crate) struct ApplyCtx<'w, 's> {
     /// The orders factories give the units they build.
     factory_orders: Query<'w, 's, &'static mut FactoryOrders>,
     autohold: Query<'w, 's, &'static mut AutoHold>,
+    /// `network_enter.lua`'s `not GetUnitIsStunned(teleporter)`.
+    stunned: Query<'w, 's, (), With<crate::units::combat::Stunned>>,
     /// Last tick's spatial snapshot (area orders expand through it);
     /// bare test worlds have none.
     spatial: Option<Res<'w, crate::units::spatial::SpatialIndex>>,
@@ -788,14 +790,31 @@ impl ApplyCtx<'_, '_> {
                     }
                 }
             }
-            SimCommand::Cast { target, auto, .. } => {
+            SimCommand::Cast {
+                target,
+                auto,
+                queue,
+                ..
+            } => {
                 let target = target.to_vec3();
                 for own in self.owned(player, ids) {
-                    if own.kind.has_command_fire_ability() {
+                    if *queue && self.orders.busy(own.e) {
+                        if own.kind.has_command_fire_ability() || own.kind.is_teleporter() {
+                            self.give(
+                                own.e,
+                                QueuedCommand::Cast {
+                                    pos: target,
+                                    auto: *auto,
+                                },
+                                true,
+                            );
+                        }
+                    } else if own.kind.has_command_fire_ability() {
                         if let Some(m) = self.command_fire.as_mut() {
                             m.write(CommandFireEvent {
                                 attacker: own.e,
                                 target,
+                                queued: false,
                             });
                         }
                     } else if own.kind.is_teleporter() {
@@ -1169,7 +1188,7 @@ impl ApplyCtx<'_, '_> {
                 let Some((target, pos, t_team, t_kind)) = self.live(t) else {
                     return;
                 };
-                if !t_kind.is_teleporter() {
+                if !t_kind.is_teleporter() || self.stunned.contains(target) {
                     return;
                 }
                 // `network_enter.lua`: the Packet's own team's teleporter.
@@ -1986,6 +2005,15 @@ mod tests {
             world.get::<EnterOrder>(packet).is_none(),
             "a Bit is no door"
         );
+        world
+            .entity_mut(port)
+            .insert(crate::units::combat::Stunned);
+        send(&mut world, 0, vec![enter(mine)]);
+        assert!(
+            world.get::<EnterOrder>(packet).is_none(),
+            "a stunned teleporter refuses"
+        );
+        world.entity_mut(port).remove::<crate::units::combat::Stunned>();
         send(&mut world, 0, vec![enter(mine)]);
         assert_eq!(
             world.get::<EnterOrder>(packet).map(|o| o.target),
@@ -1993,6 +2021,33 @@ mod tests {
         );
         assert!(world.get::<EnterOrder>(bit).is_none());
         assert_eq!(refused(&world), 0);
+    }
+
+    /// Shift keeps an aimed ability behind the unit's orders; with
+    /// nothing to wait for, it goes at once.
+    #[test]
+    fn a_queued_cast_waits_behind_the_orders() {
+        use crate::interaction::movement::CommandQueue;
+        use crate::units::mechanics::command_fire::QueuedCast;
+        let mut world = world();
+        let (pointer, id) = unit(&mut world, UnitKind::Pointer, 0, 100.0);
+        let cast = |queue| SimCommand::Cast {
+            units: Units::of([id]),
+            target: NetPos::quantize(Vec3::new(900.0, 0.0, 900.0)),
+            auto: false,
+            queue,
+        };
+        // Idle: nothing to wait for, the cast goes at once.
+        send(&mut world, 0, vec![cast(true)]);
+        assert!(world.get::<CommandQueue>(pointer).is_none());
+        // Busy: it waits in the queue.
+        world
+            .entity_mut(pointer)
+            .insert(MoveTarget(Vec3::new(50.0, 0.0, 50.0)));
+        send(&mut world, 0, vec![cast(true)]);
+        assert!(world.get::<QueuedCast>(pointer).is_none());
+        let queue = world.get::<CommandQueue>(pointer).expect("queued");
+        assert!(matches!(queue.commands[..], [QueuedCommand::Cast { .. }]));
     }
 
     /// Cheats only in a match with at most one human; god mode lets the

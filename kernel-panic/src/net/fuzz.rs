@@ -365,6 +365,7 @@ fn chaos_command(d: &mut Dice, v: &View, team: u8, tick: u32, prev: bool) -> Sim
             units,
             target: point(d),
             auto: d.chance(30),
+            queue: d.chance(30),
         },
         19 => SimCommand::SetSpeed {
             percent: MIN_SPEED_PERCENT + d.below(200) as u16,
@@ -540,6 +541,7 @@ fn malformed(
                     units: Units::of(own.iter().copied()),
                     target: v.point(d, true),
                     auto: d.chance(50),
+                    queue: d.chance(30),
                 },
                 true,
             ),

@@ -536,6 +536,7 @@ pub(crate) fn script_for(
                         units: ids(&own),
                         target: p(e.pos),
                         auto: true,
+                        queue: false,
                     });
                 }
             }

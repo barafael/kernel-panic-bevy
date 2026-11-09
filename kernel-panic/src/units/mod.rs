@@ -129,6 +129,7 @@ impl Plugin for UnitsPlugin {
             .init_match_resource::<SimRng<combat::BurstRng>>()
             .init_match_resource::<SimRng<production::FactoryExitRng>>()
             .add_observer(production::kill_orphaned_buildee)
+            .add_observer(mechanics::ghost::leave_dead_ghost)
             .add_plugins(weapon_fx::WeaponFxPlugin)
             // Everything the fixed sim moves is drawn interpolated
             // between the last two sim poses (`rendering::interpolation`).
@@ -277,6 +278,8 @@ impl Plugin for UnitsPlugin {
                         (
                             combat::tick_infections,
                             command_fire::advance_pending_casts,
+                            command_fire::run_queued_casts
+                                .before(command_fire::process_command_fire),
                             command_fire::process_command_fire,
                             command_fire::tick_nx_casts,
                             command_fire::tick_infection_casts,
@@ -334,6 +337,9 @@ impl Plugin for UnitsPlugin {
                         weapon_fx::seismic::spawn_seismic_pings,
                         cloak::install_cloak_fade_materials,
                         cloak::restore_cloak_fade_materials,
+                        mechanics::ghost::install_ghost_materials,
+                        mechanics::ghost::restore_ghost_materials,
+                        mechanics::ghost::clear_seen_dead_ghosts,
                         team_colors::recolor_taken_units,
                     )
                         .chain()

@@ -134,12 +134,17 @@ use super::state::Fnv;
 /// blocking again once a slow update finds it on another square, an
 /// Exploit never is); a Worm holding fire (cloaked, AutoHold on) neither
 /// engages idle nor diverts a Fight.
+/// 25 (2026-11-09, parity review, fifth pass): `SimCommand::Cast` carries
+/// a `queue` flag (Shift: an aimed ability waits its turn in the unit's
+/// queue as `QueuedCommand::Cast`); a builder resumes its own unfinished
+/// nanoframe with a Repair order (only it: `CanAssist=0`); Enter is
+/// refused on a stunned teleporter.
 ///
 /// [`SimCommand::Dropped`]: crate::net::SimCommand::Dropped
 /// [`SimCommand::Returned`]: crate::net::SimCommand::Returned
 /// [`SimCommand::InternalSpeed`]: crate::net::SimCommand::InternalSpeed
 /// [`MatchRules`]: crate::net::MatchRules
-pub const SIM_VERSION: u32 = 24;
+pub const SIM_VERSION: u32 = 25;
 
 /// The map-independent half of [`Compat`]: what a peer announces when
 /// it joins a room, before any map is chosen.

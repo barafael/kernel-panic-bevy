@@ -296,6 +296,7 @@ fn cast(orders: &mut CommandBus, team: u8, caster: NetId, target: Vec3) {
             units: Units::of([caster]),
             target: NetPos::quantize(target),
             auto: false,
+            queue: false,
         },
     );
 }

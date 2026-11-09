@@ -1398,6 +1398,7 @@ fn dispatch_passes_run_on_the_slow_update() {
                 units: Units::of([id]),
                 target: NetPos::quantize(target),
                 auto,
+                queue: false,
             }],
         });
     };
@@ -1509,6 +1510,7 @@ fn byte_launches_a_forward_arc_of_logic_bombs() {
                 units: Units::of([byte_id]),
                 target: NetPos::quantize(Vec3::ZERO),
                 auto: false,
+                queue: false,
             }],
         });
     }

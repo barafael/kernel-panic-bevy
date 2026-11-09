@@ -155,6 +155,10 @@ pub(crate) fn install_command(ec: &mut EntityCommands, cmd: movement::QueuedComm
         QueuedCommand::Enter { target, .. } => {
             ec.insert(crate::units::mechanics::network_buffer::EnterOrder { target });
         }
+        // Cast on the next tick (`run_queued_casts`).
+        QueuedCommand::Cast { pos, auto } => {
+            ec.insert(crate::units::mechanics::command_fire::QueuedCast { target: pos, auto });
+        }
     }
 }
 
