@@ -67,6 +67,14 @@ pub struct LastAttacker {
 /// many frames is fair game.
 pub const GUARD_RETALIATION_FRAMES: u64 = 40;
 
+/// What breaks a tie between two equally distant candidates: the
+/// `NetId`, which is the same on every machine and in every run. (The
+/// Bevy `Entity` is not: it follows the allocation order, so two peers,
+/// a shuffled run and wasm picked different targets.)
+fn tie_key(net_ids: &Query<&NetId>, entity: Entity) -> u32 {
+    net_ids.get(entity).map_or(u32::MAX, |id| id.0)
+}
+
 /// Units that never engage on their own: the Pointer holds position.
 fn holds_position(kind: UnitKind) -> bool {
     matches!(kind, UnitKind::Pointer)
@@ -121,6 +129,7 @@ pub fn idle_engage_system(
         ),
     >,
     spatial: Res<SpatialIndex>,
+    net_ids: Query<&NetId>,
     alliances: Res<Alliances>,
     unit_registry: Res<UnitRegistry>,
     weapon_registry: Res<WeaponRegistry>,
@@ -149,7 +158,7 @@ pub fn idle_engage_system(
         let pos = tf.translation;
         let aim_from = pos + Vec3::Y * stats.mid_y;
         let reach = weapon.effective_range();
-        let mut nearest: Option<(f32, Entity)> = None;
+        let mut nearest: Option<(f32, u32, Entity)> = None;
         spatial.query_radius(pos, reach + ENGAGE_MARGIN, |candidate| {
             if candidate.feature
                 || !candidate.hp_positive
@@ -169,11 +178,12 @@ pub fn idle_engage_system(
             if aim::in_weapon_range(weapon, aim_from, candidate.mid_pos(), false, map_gravity) {
                 return;
             }
-            if nearest.is_none_or(|(best, e)| (d_sq, candidate.entity) < (best, e)) {
-                nearest = Some((d_sq, candidate.entity));
+            let key = tie_key(&net_ids, candidate.entity);
+            if nearest.is_none_or(|(best, best_key, _)| (d_sq, key) < (best, best_key)) {
+                nearest = Some((d_sq, key, candidate.entity));
             }
         });
-        let Some((_, target)) = nearest else {
+        let Some((_, _, target)) = nearest else {
             continue;
         };
         commands.entity(entity).insert((
@@ -250,6 +260,7 @@ pub fn fight_divert_system(
         ),
     >,
     spatial: Res<SpatialIndex>,
+    net_ids: Query<&NetId>,
     alliances: Res<Alliances>,
     unit_registry: Res<UnitRegistry>,
     weapon_registry: Res<WeaponRegistry>,
@@ -272,7 +283,7 @@ pub fn fight_divert_system(
         let pos = tf.translation;
         let aim_from = pos + Vec3::Y * stats.mid_y;
         let reach = weapon.effective_range() + FIGHT_MARGIN;
-        let mut nearest: Option<(f32, Entity)> = None;
+        let mut nearest: Option<(f32, u32, Entity)> = None;
         let mut in_reach = false;
         spatial.query_radius(pos, reach, |candidate| {
             if candidate.feature
@@ -290,13 +301,14 @@ pub fn fight_divert_system(
                 return;
             }
             let d_sq = flat_dist_sq(candidate.pos, pos);
-            if d_sq <= reach * reach
-                && nearest.is_none_or(|(best, e)| (d_sq, candidate.entity) < (best, e))
-            {
-                nearest = Some((d_sq, candidate.entity));
+            if d_sq <= reach * reach {
+                let key = tie_key(&net_ids, candidate.entity);
+                if nearest.is_none_or(|(best, best_key, _)| (d_sq, key) < (best, best_key)) {
+                    nearest = Some((d_sq, key, candidate.entity));
+                }
             }
         });
-        let Some((_, target)) = nearest.filter(|_| !in_reach) else {
+        let Some((_, _, target)) = nearest.filter(|_| !in_reach) else {
             continue;
         };
         commands
