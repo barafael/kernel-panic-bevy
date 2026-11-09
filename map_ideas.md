@@ -48,14 +48,20 @@ Long, narrow rectangular map (e.g. 6×16) divided into 4–5 stages by gentle ri
 
 Two-player mirror where one half's heightmap is bit-reversed relative to the other — high ground on the left maps to low ground on the right. Reads symmetric on the minimap but plays asymmetric.
 
-## Heat Sink
+## Heat Sink — *implemented* (`heat_sink_v1`)
 
 Radial fins. A central CPU die with finned ridges radiating outward; datavents in the troughs between fins. Kbots love the fins, tanks live in the troughs.
 
-## Fork Bomb
+Implementation: straight edges only. The four banks of fins run along the axes (four fins and three troughs a bank, a vent halfway down each trough, a bus lane, the heat pipe, down the middle one), the die is a raised blue plateau with a ramp on each side, and a start plateau with a second vent and a mounting hole (void) sits in each corner; quarter-turn symmetric, 4096 elmos. Every mover has the same slope limit here, so "kbots on the fins" did not carry over: the fins are walls.
+
+## Fork Bomb — *implemented* (`fork_bomb_v1`)
 
 8-player FFA. Tiny starting alcoves around the rim, each with one datavent, all feeding into a chaotic open center with 2–3 contested vents. Designed to die fast and loud.
 
-## Boot Sector
+Implementation: two alcoves a side, each a stem that splits in a bar into two tines (the fork) running into one open arena over the void. Five contested vents: one at the middle of each side, between the two forks that reach it, and one on a plateau in the middle; four mesas for cover. Quarter-turn symmetric, 3072 elmos, every alcove the same walk from the middle.
+
+## Boot Sector — *implemented* (`boot_sector_v1`)
 
 Deliberately tiny (4×4) duel map. Two datavents per side, one in the middle. The KP equivalent of a chess opening trainer.
+
+Implementation: 2048 elmos drawn as a chessboard (one colour per square, all one height), a home and a second vent a side, the third vent on a plateau between whose two ramps face the homes, four mesas at its corners. Half-turn symmetric: the homes walk the same to the middle.

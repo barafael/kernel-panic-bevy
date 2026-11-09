@@ -71,6 +71,21 @@ required-features = ["write"]
 name = "gen_pipeline"
 required-features = ["write"]
 
+# Generates kernel-panic/assets/maps/boot_sector_v1.kpmap.
+[[example]]
+name = "gen_boot_sector"
+required-features = ["write"]
+
+# Generates kernel-panic/assets/maps/fork_bomb_v1.kpmap.
+[[example]]
+name = "gen_fork_bomb"
+required-features = ["write"]
+
+# Generates kernel-panic/assets/maps/heat_sink_v1.kpmap.
+[[example]]
+name = "gen_heat_sink"
+required-features = ["write"]
+
 # Generates kernel-panic/assets/maps/previews/ (the map selector's previews).
 [[example]]
 name = "gen_previews"
