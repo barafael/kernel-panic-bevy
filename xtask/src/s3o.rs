@@ -35,7 +35,7 @@ fn piece_tree(data: &[u8]) -> Result<String, String> {
     let mut out = String::new();
     let (radius, height) = (f32_at(data, 16)?, f32_at(data, 20)?);
     let _ = writeln!(out, "# radius={radius:.1} height={height:.1}");
-    piece(data, offset(i32_at(data, 40)?)?, 0, &mut out)?;
+    piece(data, offset(i32_at(data, 36)?)?, 0, &mut out)?;
     Ok(out)
 }
 
