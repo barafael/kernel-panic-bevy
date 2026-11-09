@@ -1,5 +1,7 @@
-//! `cargo testbox`, a Cargo alias of this xtask (`.cargo/config.toml`):
-//! several games on this machine in one multiplayer room, introduced by
+//! `cargo xtask` and `cargo testbox`, Cargo aliases of this crate
+//! (`.cargo/config.toml`).
+//!
+//! `cargo testbox`: several games on this machine in one multiplayer room, introduced by
 //! a signaling server in this process ([`kp_signaling`]), talking WebRTC
 //! over host candidates only. Nothing leaves the machine.
 //!
@@ -11,7 +13,10 @@
 //! autopilot (`KP_AUTO_START`, `kernel-panic/src/net/autopilot.rs`)
 //! seats everyone and starts the match, unless `--manual`.
 
+mod cob;
 mod peers;
+mod s3o;
+mod zisofs;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -20,7 +25,15 @@ use std::time::Duration;
 use peers::{Launch, Peers};
 
 const USAGE: &str = "\
-cargo testbox: several Kernel Panic games in one multiplayer room, on this machine.
+cargo xtask: tools for developing Kernel Panic. `cargo testbox` is the same program.
+
+AUDIT TOOLS (for the original game's data):
+    cargo xtask cob <file.cob>                  disassemble a compiled unit script
+    cargo xtask s3o <model.s3o>                 a model's piece tree: offsets, vertex counts
+    cargo xtask zisofs <extracted-dir> <out>    decode a zisofs tree (7z's extraction of an
+                                                mkzftree ISO, e.g. the 2013 KP 4.4 package)
+
+TESTBOX: several Kernel Panic games in one multiplayer room, on this machine.
 
 USAGE:
     cargo testbox up [OPTIONS]          play: launch the games, wait until they close (Ctrl-C ends all)
@@ -53,6 +66,9 @@ fn main() -> ExitCode {
         Some("test") => Opts::parse(&args[1..]).and_then(|o| test(&o)),
         Some("send") => send(&args[1..]),
         Some("signaling") => signaling(&args[1..]),
+        Some("cob") => cob::run(&args[1..]),
+        Some("s3o") => s3o::run(&args[1..]),
+        Some("zisofs") => zisofs::run(&args[1..]),
         Some("-h" | "--help" | "help") | None => {
             print!("{USAGE}");
             Ok(())
@@ -62,7 +78,7 @@ fn main() -> ExitCode {
     match outcome {
         Ok(()) => ExitCode::SUCCESS,
         Err(why) => {
-            eprintln!("testbox: {why}");
+            eprintln!("xtask: {why}");
             ExitCode::FAILURE
         }
     }

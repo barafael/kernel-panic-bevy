@@ -2,3 +2,6 @@
 # Several games in one multiplayer room on this machine (xtask/src/main.rs):
 # nothing to install beyond cargo.
 testbox = "run --quiet -p xtask --"
+# The same program under its general name: the audit tools
+# (`cargo xtask cob|s3o|zisofs`) and the testbox.
+xtask = "run --quiet -p xtask --"
