@@ -96,7 +96,11 @@ pub fn init_morph_gates(
 #[allow(clippy::type_complexity)]
 pub fn tick_morph_gates(
     time: Res<Time>,
-    mut gates: Query<(&mut MorphGate, &UnitType, Has<crate::units::spawning::Emerging>)>,
+    mut gates: Query<(
+        &mut MorphGate,
+        &UnitType,
+        Has<crate::units::spawning::Emerging>,
+    )>,
     fired: Query<
         Entity,
         (
@@ -153,13 +157,15 @@ pub fn start_morph(
 #[allow(clippy::type_complexity)]
 pub fn tick_morph(
     time: Res<Time>,
-    mut units: Query<(Entity, &mut Morphing, Option<&MorphGate>), Without<Dying>>,
+    mut units: Query<(Entity, &mut Morphing, Option<&MorphGate>, &NetId), Without<Dying>>,
     mut animators: Query<&mut crate::units::assets::animation::UnitAnimator>,
     mut done: MessageWriter<MorphDone>,
     mut commands: Commands,
 ) {
     let dt = time.delta_secs();
-    for (entity, mut morph, gate) in &mut units {
+    // By NetId: the order of the `MorphDone`s is the order the pairs are
+    // spawned in, so it fixes their NetIds.
+    for (entity, mut morph, gate, _) in units.iter_mut().sort::<&NetId>() {
         if !morph.started {
             if gate.is_some_and(|g| g.remaining > 0.0) {
                 continue;
@@ -459,7 +465,10 @@ mod tests {
             });
         world.run_system_once(start_morph).unwrap();
         assert!(world.get::<Morphing>(bug).is_some());
-        assert!(world.get::<MorphSilenced>(bug).is_none(), "a Bug still fires while it waits");
+        assert!(
+            world.get::<MorphSilenced>(bug).is_none(),
+            "a Bug still fires while it waits"
+        );
         let step = |world: &mut World, secs: f32| {
             world
                 .resource_mut::<Time>()

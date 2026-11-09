@@ -240,7 +240,12 @@ pub(crate) fn unit_motion_systems() -> ScheduleConfigs<ScheduleSystem> {
             .after(structures::update_structure_layer)
             .before(movement_system),
         movement_system,
-        ground_move::reblock_moved_units.after(movement_system),
+        // Before the hover system: both touch `Transform` (of different
+        // entities, ground and air), and unordered the executor picks
+        // (`headless` ambiguity check).
+        ground_move::reblock_moved_units
+            .after(movement_system)
+            .before(air_movement::hover_air_system),
         // `smoothGround.UpdateSmoothMesh()` precedes the unit
         // updates in the engine's frame.
         crate::terrain::smooth_ground::update_smooth_ground.before(air_movement::hover_air_system),

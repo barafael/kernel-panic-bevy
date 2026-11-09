@@ -139,12 +139,16 @@ use super::state::Fnv;
 /// queue as `QueuedCommand::Cast`); a builder resumes its own unfinished
 /// nanoframe with a Repair order (only it: `CanAssist=0`); Enter is
 /// refused on a stunned teleporter.
+/// 26 (2026-11-09, CI of 25): the Bug/Exploit morphs that finish on the
+/// same tick are spawned in `NetId` order (their pairs took their ids in
+/// query order, so the ids, and the sim from there on, depended on the
+/// ECS storage order and diverged between a shuffled and a plain run).
 ///
 /// [`SimCommand::Dropped`]: crate::net::SimCommand::Dropped
 /// [`SimCommand::Returned`]: crate::net::SimCommand::Returned
 /// [`SimCommand::InternalSpeed`]: crate::net::SimCommand::InternalSpeed
 /// [`MatchRules`]: crate::net::MatchRules
-pub const SIM_VERSION: u32 = 25;
+pub const SIM_VERSION: u32 = 26;
 
 /// The map-independent half of [`Compat`]: what a peer announces when
 /// it joins a room, before any map is chosen.
