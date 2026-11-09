@@ -8738,6 +8738,7 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "ctrlc",
+ "flate2",
  "kp-signaling",
  "libc",
 ]
