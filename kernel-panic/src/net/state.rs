@@ -455,6 +455,14 @@ pub fn capture(world: &mut World) -> Capture {
 /// and orders.
 pub fn describe(world: &mut World) -> Vec<String> {
     let mut q = world.query::<UnitQ>();
+    // Targets by NetId: the orders hash holds them, so a dump that only
+    // said "attack true" could not show which of two targets was picked.
+    let id_of: HashMap<Entity, u32> = q.iter(world).map(|((e, id, ..), ..)| (e, id.0)).collect();
+    let target = |e: Entity| {
+        id_of
+            .get(&e)
+            .map_or("gone".to_string(), |id| format!("#{id}"))
+    };
     let mut out: Vec<String> = q
         .iter(world)
         .map(
@@ -466,7 +474,7 @@ pub fn describe(world: &mut World) -> Vec<String> {
             )| {
                 let tf = pose.sim();
                 format!(
-                    "#{:06} {:?} t{} pos {:?} rot {:?} hp {:?} dying {} emerging {:?} stunned {} | mt {:?} fight {} guard {} attack {} ag {:?} pb {:?} cons {:?} queue {:?} prod {:?} clear {:?} bombard {:?} enter {:?} repair {:?} | {e:?}",
+                    "#{:06} {:?} t{} pos {:?} rot {:?} hp {:?} dying {} emerging {:?} stunned {} | mt {:?} fight {} guard {:?} attack {:?} ag {:?} pb {:?} cons {:?} queue {:?} prod {:?} clear {:?} bombard {:?} enter {:?} repair {:?} | {e:?}",
                     id.0,
                     ut.0,
                     team.0,
@@ -478,8 +486,8 @@ pub fn describe(world: &mut World) -> Vec<String> {
                     stunned,
                     mt.map(|m| m.0),
                     fight,
-                    guard.is_some(),
-                    attack.is_some(),
+                    guard.map(|g| target(g.0)),
+                    attack.map(|a| target(a.target)),
                     attack_ground.map(|a| a.pos),
                     pending_build.map(|p| (p.kind, p.site)),
                     constructing.map(|c| (c.kind, c.site)),

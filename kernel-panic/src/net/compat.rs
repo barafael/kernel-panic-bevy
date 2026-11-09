@@ -143,12 +143,17 @@ use super::state::Fnv;
 /// same tick are spawned in `NetId` order (their pairs took their ids in
 /// query order, so the ids, and the sim from there on, depended on the
 /// ECS storage order and diverged between a shuffled and a plain run).
+/// 27 (2026-11-09, CI of 26): idle and Fight engagement break a tie
+/// between two equally distant targets by `NetId`, not by the Bevy
+/// `Entity` (which follows the allocation order: wasm and a shuffled run
+/// picked another target than native, so the orders hash and from there
+/// the sim diverged).
 ///
 /// [`SimCommand::Dropped`]: crate::net::SimCommand::Dropped
 /// [`SimCommand::Returned`]: crate::net::SimCommand::Returned
 /// [`SimCommand::InternalSpeed`]: crate::net::SimCommand::InternalSpeed
 /// [`MatchRules`]: crate::net::MatchRules
-pub const SIM_VERSION: u32 = 26;
+pub const SIM_VERSION: u32 = 27;
 
 /// The map-independent half of [`Compat`]: what a peer announces when
 /// it joins a room, before any map is chosen.
