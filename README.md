@@ -27,7 +27,7 @@ the formats the game reads, with no conversion step anywhere:
   class definition, the original text files, parsed at startup.
 - `kernel-panic/assets/units.kpu`: every model and texture
   (`unit-bundle.md`). Both are embedded in the binary.
-- `kernel-panic/assets/maps/*.kpmap`: the 25 maps (`spring-map/src/baked.rs`
+- `kernel-panic/assets/maps/*.kpmap`: the 28 maps (`spring-map/src/baked.rs`
   documents the format). Native reads them from `assets/`, the web build
   fetches them.
 - `kernel-panic/assets/{sounds,music,cursors,unitpics,bitmaps}`: the
@@ -56,7 +56,8 @@ git checkout 81f4e96 -- spring-map spring-map-gen kernel-panic/assets/maps
 The port's own maps are generated, not converted: `deadlock_v1`,
 `token_ring_v1`, `heap_fragmentation_v1`, `three_way_handshake_v1`,
 `pipeline_v1` (layouts after Beyond All Reason maps) and
-`circular_buffer_{3,4,5,6}_v1`, drawn in the style of FireStorm's Dual
+`circular_buffer_{3,4,5,6}_v1`, and the original ideas `boot_sector_v1`,
+`fork_bomb_v1` and `heat_sink_v1` (straight edges only), drawn in the style of FireStorm's Dual
 Core / Quad Core / Data Cache L1 by `spring-map`'s `kpgen` module. Each
 has a script in `spring-map/examples/` that writes its `.kpmap` in place:
 
