@@ -94,7 +94,8 @@ pub fn buildee_health(
                 let step = progress - paid.last;
                 paid.last = progress;
                 if step != 0.0 && health.current > 0.0 {
-                    health.current = (health.current + health.max * step).det_clamp(0.1, health.max);
+                    health.current =
+                        (health.current + health.max * step).det_clamp(0.1, health.max);
                 }
             }
         }
@@ -335,12 +336,20 @@ mod tests {
                 crate::units::components::Health::full(1000.0),
             ))
             .id();
-        let hp = |world: &World| world.get::<crate::units::components::Health>(unit).unwrap().current;
+        let hp = |world: &World| {
+            world
+                .get::<crate::units::components::Health>(unit)
+                .unwrap()
+                .current
+        };
         world.run_system_once(buildee_health).unwrap();
         assert!((hp(&world) - 0.1).abs() < 1e-3, "starts at 0.1");
         world.get_mut::<Emerging>(unit).unwrap().remaining = 5.0;
         world.run_system_once(buildee_health).unwrap();
-        assert!((hp(&world) - 500.1).abs() < 1e-2, "half built, half the health");
+        assert!(
+            (hp(&world) - 500.1).abs() < 1e-2,
+            "half built, half the health"
+        );
         world
             .get_mut::<crate::units::components::Health>(unit)
             .unwrap()

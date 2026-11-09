@@ -216,7 +216,10 @@ mod tests {
             "still lying in the dissolve"
         );
         run(&mut anim, &mut rig, 1.0);
-        assert!(rig.piece_translations[0][1].abs() < 0.1, "back on the ground");
+        assert!(
+            rig.piece_translations[0][1].abs() < 0.1,
+            "back on the ground"
+        );
         assert_eq!(anim.flip, Flip::Idle);
     }
 }

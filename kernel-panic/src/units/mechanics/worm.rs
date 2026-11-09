@@ -286,7 +286,10 @@ mod tests {
         assert!(app.world().get::<SensorsPending>(early).is_some());
         assert!(app.world().get::<Detector>(early).is_none());
         assert!(app.world().get::<SensorsPending>(due).is_none());
-        assert_eq!(app.world().get::<Detector>(due).map(|d| d.radius), Some(256.0));
+        assert_eq!(
+            app.world().get::<Detector>(due).map(|d| d.radius),
+            Some(256.0)
+        );
         assert_eq!(
             app.world().get::<SeismicDetector>(due).map(|d| d.radius),
             Some(1024.0)

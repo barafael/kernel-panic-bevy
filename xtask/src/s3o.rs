@@ -41,7 +41,9 @@ fn piece_tree(data: &[u8]) -> Result<String, String> {
 
 fn piece(data: &[u8], at: usize, depth: usize, out: &mut String) -> Result<(), String> {
     if depth > MAX_DEPTH {
-        return Err(format!("piece tree deeper than {MAX_DEPTH}: a child loops back"));
+        return Err(format!(
+            "piece tree deeper than {MAX_DEPTH}: a child loops back"
+        ));
     }
     if at + PIECE_LEN > data.len() {
         return Err(format!("piece at {at} runs past the end of the file"));
@@ -50,7 +52,11 @@ fn piece(data: &[u8], at: usize, depth: usize, out: &mut String) -> Result<(), S
     let children = i32_at(data, at + 4)?;
     let children_at = offset(i32_at(data, at + 8)?)?;
     let vertices = i32_at(data, at + 12)?;
-    let (x, y, z) = (f32_at(data, at + 40)?, f32_at(data, at + 44)?, f32_at(data, at + 48)?);
+    let (x, y, z) = (
+        f32_at(data, at + 40)?,
+        f32_at(data, at + 44)?,
+        f32_at(data, at + 48)?,
+    );
     let _ = writeln!(
         out,
         "{}{name}  off=({x:.2},{y:.2},{z:.2}) verts={vertices}",
@@ -82,7 +88,9 @@ fn f32_at(data: &[u8], at: usize) -> Result<f32, String> {
 }
 
 fn cstr_at(data: &[u8], at: usize) -> Result<String, String> {
-    let tail = data.get(at..).ok_or_else(|| format!("string at {at} is past the end"))?;
+    let tail = data
+        .get(at..)
+        .ok_or_else(|| format!("string at {at} is past the end"))?;
     let len = tail
         .iter()
         .position(|&b| b == 0)

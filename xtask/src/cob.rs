@@ -20,5 +20,8 @@ pub fn run(args: &[String]) -> Result<(), String> {
         .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../spring-cob"))
         .status()
         .map_err(|e| format!("cargo: {e}"))?;
-    status.success().then_some(()).ok_or_else(|| "cobdump failed".into())
+    status
+        .success()
+        .then_some(())
+        .ok_or_else(|| "cobdump failed".into())
 }

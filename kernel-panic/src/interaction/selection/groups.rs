@@ -203,7 +203,9 @@ mod tests {
         use crate::units::content::definitions::UnitKind;
         use bevy::ecs::system::RunSystemOnce;
         let mut world = World::new();
-        let alive = world.spawn((UnitType(UnitKind::Bit), Transform::default())).id();
+        let alive = world
+            .spawn((UnitType(UnitKind::Bit), Transform::default()))
+            .id();
         let dying = world
             .spawn((
                 UnitType(UnitKind::Bit),

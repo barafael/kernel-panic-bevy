@@ -432,10 +432,7 @@ pub fn death_system(
 #[allow(clippy::type_complexity)]
 pub fn tick_self_destruct(
     time: Res<Time>,
-    mut query: Query<
-        (&mut SelfDestructCountdown, &mut Health),
-        (Without<Dying>, Without<Stunned>),
-    >,
+    mut query: Query<(&mut SelfDestructCountdown, &mut Health), (Without<Dying>, Without<Stunned>)>,
 ) {
     let dt = time.delta_secs();
     for (mut countdown, mut health) in &mut query {

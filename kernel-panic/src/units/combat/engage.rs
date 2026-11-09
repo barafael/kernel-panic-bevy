@@ -290,7 +290,9 @@ pub fn fight_divert_system(
                 return;
             }
             let d_sq = flat_dist_sq(candidate.pos, pos);
-            if d_sq <= reach * reach && nearest.is_none_or(|(best, e)| (d_sq, candidate.entity) < (best, e)) {
+            if d_sq <= reach * reach
+                && nearest.is_none_or(|(best, e)| (d_sq, candidate.entity) < (best, e))
+            {
                 nearest = Some((d_sq, candidate.entity));
             }
         });
@@ -397,7 +399,10 @@ mod tests {
 
         let (mut rig, unit, _) = rig_at(UnitKind::Bit, 100_000.0);
         rig.world.run_system_once(idle_engage_system).unwrap();
-        assert!(rig.world.get::<AttackTargetOrder>(unit).is_none(), "too far");
+        assert!(
+            rig.world.get::<AttackTargetOrder>(unit).is_none(),
+            "too far"
+        );
 
         let (mut rig, unit, _) = rig_at(UnitKind::Bit, 20.0);
         rig.world.run_system_once(idle_engage_system).unwrap();

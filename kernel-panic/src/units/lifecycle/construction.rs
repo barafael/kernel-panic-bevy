@@ -183,7 +183,12 @@ pub fn tick_repair(
         (Without<Dying>, Without<Stunned>),
     >,
     mut targets: Query<
-        (&Transform, &UnitType, &TeamId, &mut crate::units::components::Health),
+        (
+            &Transform,
+            &UnitType,
+            &TeamId,
+            &mut crate::units::components::Health,
+        ),
         (Without<Dying>, Without<Emerging>),
     >,
     // A nanoframe: only the builder that started it may carry on.
@@ -1053,7 +1058,11 @@ mod tests {
                 .current
         };
         world.run_system_once(tick_repair).unwrap();
-        assert!((hp(&world) - (1000.0 + rate)).abs() < 1.0, "{} vs {rate}", hp(&world));
+        assert!(
+            (hp(&world) - (1000.0 + rate)).abs() < 1.0,
+            "{} vs {rate}",
+            hp(&world)
+        );
         assert!(world.get::<Repairing>(builder).is_some());
 
         // Out of range: it walks.
@@ -1083,7 +1092,11 @@ mod tests {
         world.insert_resource(crate::units::teams::Alliances::from_seats([(0, 0)]));
         world.insert_resource(UnitRegistry::load());
         let owner = world
-            .spawn((UnitType(UnitKind::Assembler), TeamId(0), Transform::default()))
+            .spawn((
+                UnitType(UnitKind::Assembler),
+                TeamId(0),
+                Transform::default(),
+            ))
             .id();
         let frame = world
             .spawn((
@@ -1105,10 +1118,18 @@ mod tests {
             ))
             .id();
         let stranger = world
-            .spawn((UnitType(UnitKind::Assembler), TeamId(0), Transform::default()))
+            .spawn((
+                UnitType(UnitKind::Assembler),
+                TeamId(0),
+                Transform::default(),
+            ))
             .id();
-        world.entity_mut(owner).insert(RepairOrder { target: frame });
-        world.entity_mut(stranger).insert(RepairOrder { target: frame });
+        world
+            .entity_mut(owner)
+            .insert(RepairOrder { target: frame });
+        world
+            .entity_mut(stranger)
+            .insert(RepairOrder { target: frame });
         world.run_system_once(tick_repair).unwrap();
         assert!(world.get::<MoveTarget>(owner).is_some(), "walks to it");
         assert!(world.get::<RepairOrder>(owner).is_some());

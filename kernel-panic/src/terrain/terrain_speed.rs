@@ -115,7 +115,10 @@ impl TerrainSpeedMap {
             if x >= self.water_width {
                 1.0
             } else {
-                self.water.get(z * self.water_width + x).copied().unwrap_or(1.0)
+                self.water
+                    .get(z * self.water_width + x)
+                    .copied()
+                    .unwrap_or(1.0)
             }
         };
         terrain * water

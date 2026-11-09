@@ -507,13 +507,11 @@ fn handle_right_click(
             // `MobileCAI.cpp:974-997`). Units that can't guard (they take
             // no move orders) ignore the click.
             let friend = my_team.and_then(|mine| {
-                unit_hit(&windows, &camera_q, &mut ray_cast, &unit_root_q, &parent_q).filter(
-                    |&t| {
-                        unit_info_q
-                            .get(t)
-                            .is_ok_and(|tt| alliances.friendly(mine, tt.0))
-                    },
-                )
+                unit_hit(&windows, &camera_q, &mut ray_cast, &unit_root_q, &parent_q).filter(|&t| {
+                    unit_info_q
+                        .get(t)
+                        .is_ok_and(|tt| alliances.friendly(mine, tt.0))
+                })
             });
             if let Some(friend) = friend {
                 // A constructor's default command on a damaged friend is

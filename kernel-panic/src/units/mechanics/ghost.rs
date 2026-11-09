@@ -99,11 +99,7 @@ pub fn leave_dead_ghost(
         return;
     };
     let ghost = commands
-        .spawn((
-            DeadGhost,
-            gtf.compute_transform(),
-            Visibility::Visible,
-        ))
+        .spawn((DeadGhost, gtf.compute_transform(), Visibility::Visible))
         .id();
     for child in children.iter().filter(|&c| models.contains(c)) {
         commands
@@ -158,7 +154,9 @@ pub fn clear_seen_dead_ghosts(
             || viewers.iter().any(|(team, kind, v)| {
                 let sight = registry.sight_distance(kind.0);
                 alliances.friendly(team.0, player.0)
-                    && v.translation().xz().distance_squared(gtf.translation().xz())
+                    && v.translation()
+                        .xz()
+                        .distance_squared(gtf.translation().xz())
                         <= sight * sight
             });
         if seen {
@@ -206,13 +204,9 @@ mod tests {
         let seen = building(&mut world, false);
         let remembered = building(&mut world, true);
         world.flush();
-        world
-            .entity_mut(seen)
-            .insert(Dying { timer: 0.0 });
+        world.entity_mut(seen).insert(Dying { timer: 0.0 });
         assert_eq!(world.query::<&DeadGhost>().iter(&world).count(), 0);
-        world
-            .entity_mut(remembered)
-            .insert(Dying { timer: 0.0 });
+        world.entity_mut(remembered).insert(Dying { timer: 0.0 });
         world.flush();
         let (ghost, tf) = world
             .query_filtered::<(Entity, &Transform), With<DeadGhost>>()

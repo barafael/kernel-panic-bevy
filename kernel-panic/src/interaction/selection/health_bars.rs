@@ -21,10 +21,7 @@ impl Plugin for HealthBarsPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             Update,
-            (
-                sync_health_bars,
-                update_health_bars.after(sync_health_bars),
-            )
+            (sync_health_bars, update_health_bars.after(sync_health_bars))
                 .in_set(SelectionSet::Visuals),
         );
     }
@@ -76,7 +73,13 @@ fn wants_bar(health: &Health, selected: bool) -> bool {
 #[allow(clippy::type_complexity)]
 fn sync_health_bars(
     units: Query<
-        (Entity, &Health, Has<Selected>, Has<HasHealthBar>, Has<crate::units::combat::Dying>),
+        (
+            Entity,
+            &Health,
+            Has<Selected>,
+            Has<HasHealthBar>,
+            Has<crate::units::combat::Dying>,
+        ),
         With<UnitType>,
     >,
     children_q: Query<&Children>,
@@ -104,7 +107,12 @@ fn sync_health_bars(
             continue;
         }
         let assets = assets.get_or_insert_with(|| {
-            get_or_init_bar_assets(bar_assets.as_deref().cloned(), &mut commands, &mut meshes, &mut materials)
+            get_or_init_bar_assets(
+                bar_assets.as_deref().cloned(),
+                &mut commands,
+                &mut meshes,
+                &mut materials,
+            )
         });
         commands.entity(entity).insert(HasHealthBar);
         // Background bar (dark).
@@ -147,7 +155,10 @@ fn sync_health_bars(
 #[allow(clippy::type_complexity)]
 fn update_health_bars(
     camera_q: Query<&GlobalTransform, With<RtsCamera>>,
-    selected_units: Query<(&Health, &GlobalTransform, &Children), (With<HasHealthBar>, With<UnitType>)>,
+    selected_units: Query<
+        (&Health, &GlobalTransform, &Children),
+        (With<HasHealthBar>, With<UnitType>),
+    >,
     mut bars: Query<
         (
             &mut Transform,

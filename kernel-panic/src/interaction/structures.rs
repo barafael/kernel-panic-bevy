@@ -579,11 +579,15 @@ mod tests {
         assert_eq!(south.len(), west.len());
         // North is south turned 180° about the footprint's centre.
         let sum = |v: &[(u32, u32)]| {
-            v.iter()
-                .fold((0u64, 0u64), |a, &(x, z)| (a.0 + u64::from(x), a.1 + u64::from(z)))
+            v.iter().fold((0u64, 0u64), |a, &(x, z)| {
+                (a.0 + u64::from(x), a.1 + u64::from(z))
+            })
         };
         let (s, n) = (sum(&south), sum(&north));
-        let centre_sum = (2 * (centre.x / 8.0) as u64 * south.len() as u64, 2 * (centre.z / 8.0) as u64 * south.len() as u64);
+        let centre_sum = (
+            2 * (centre.x / 8.0) as u64 * south.len() as u64,
+            2 * (centre.z / 8.0) as u64 * south.len() as u64,
+        );
         assert!(
             s.0.abs_diff(centre_sum.0 - n.0) <= south.len() as u64
                 && s.1.abs_diff(centre_sum.1 - n.1) <= south.len() as u64,

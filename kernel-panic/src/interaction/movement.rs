@@ -795,7 +795,8 @@ pub fn guard_follow_system(
         // `ExecuteGuard`: whatever hit the guarded unit in the last 40
         // frames is attacked; the guard resumes when it is dealt with.
         if let Some(attacker) = attacker.filter(|a| {
-            tick.frame().saturating_sub(a.frame) < crate::units::combat::engage::GUARD_RETALIATION_FRAMES
+            tick.frame().saturating_sub(a.frame)
+                < crate::units::combat::engage::GUARD_RETALIATION_FRAMES
                 && targets.contains(a.entity)
         }) {
             commands.entity(entity).insert(AttackTargetOrder {
