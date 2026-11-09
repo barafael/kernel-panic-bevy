@@ -502,6 +502,7 @@ pub fn update_fog_visibility(
             &mut Visibility,
             Has<Spotted>,
             &UnitType,
+            Has<super::ghost::Ghosted>,
         ),
         (Without<Cloaked>, Without<Dying>),
     >,
@@ -520,7 +521,10 @@ pub fn update_fog_visibility(
     // `Spotted` marker is set on units that spawned while fog was
     // disabled, so minimap / HUD filters keyed off `Spotted` light up.
     if !fog.0 {
-        for (entity, _, _, mut vis, was_spotted, _) in &mut targets_q {
+        for (entity, _, _, mut vis, was_spotted, _, ghosted) in &mut targets_q {
+            if ghosted {
+                commands.entity(entity).remove::<super::ghost::Ghosted>();
+            }
             if *vis != Visibility::Visible {
                 *vis = Visibility::Visible;
             }
@@ -553,10 +557,13 @@ pub fn update_fog_visibility(
             });
         });
 
-    for (entity, team, _gtf, mut vis, was_spotted, kind) in &mut targets_q {
+    for (entity, team, _gtf, mut vis, was_spotted, kind, ghosted) in &mut targets_q {
         // Friendly units always visible to the player; their Spotted
         // marker stays in sync so the minimap shows them.
         if alliances.friendly(team.0, player.0) {
+            if ghosted {
+                commands.entity(entity).remove::<super::ghost::Ghosted>();
+            }
             if *vis != Visibility::Visible {
                 *vis = Visibility::Visible;
             }
@@ -569,6 +576,9 @@ pub fn update_fog_visibility(
         let in_sight = in_sight.contains(&entity);
 
         if in_sight {
+            if ghosted {
+                commands.entity(entity).remove::<super::ghost::Ghosted>();
+            }
             if !was_spotted {
                 commands.entity(entity).insert(Spotted);
             }
@@ -578,8 +588,14 @@ pub fn update_fog_visibility(
         } else if was_spotted && unit_registry.is_building(kind.0) {
             // `GhostedBuildings` (on by default): a building seen once
             // stays on screen and the minimap where it was last seen,
-            // until that spot is seen again. (Drawn as it is, not dimmed.)
+            // until that spot is seen again, dimmed ([`super::ghost`]).
+            if !ghosted {
+                commands.entity(entity).insert(super::ghost::Ghosted);
+            }
         } else {
+            if ghosted {
+                commands.entity(entity).remove::<super::ghost::Ghosted>();
+            }
             if was_spotted {
                 commands.entity(entity).remove::<Spotted>();
             }

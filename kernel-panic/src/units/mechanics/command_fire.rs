@@ -476,6 +476,60 @@ pub struct PendingCommandFire {
 pub struct CommandFireEvent {
     pub attacker: Entity,
     pub target: Vec3,
+    /// Came off the unit's queue: its remaining orders stay.
+    pub queued: bool,
+}
+
+/// A Shift-queued cast that reached the head of the queue
+/// ([`QueuedCommand::Cast`]); [`run_queued_casts`] turns it into the cast
+/// the next tick.
+///
+/// [`QueuedCommand::Cast`]: crate::interaction::movement::QueuedCommand::Cast
+#[derive(Component, Clone, Copy, Debug)]
+#[component(storage = "SparseSet")]
+pub struct QueuedCast {
+    pub target: Vec3,
+    pub auto: bool,
+}
+
+/// Cast what the queue handed over: command-fire casters through
+/// [`CommandFireEvent`] (range and approach as for a direct cast, but the
+/// queue is kept), teleporters as a Dispatch order.
+pub fn run_queued_casts(
+    casters: Query<(Entity, &UnitType, &QueuedCast, &NetId), Without<Dying>>,
+    mut events: MessageWriter<CommandFireEvent>,
+    mut commands: Commands,
+) {
+    for (entity, unit, cast, _) in casters.iter().sort::<&NetId>() {
+        commands.entity(entity).remove::<QueuedCast>();
+        if unit.0.is_teleporter() {
+            commands
+                .entity(entity)
+                .insert(crate::units::mechanics::network_buffer::DispatchOrder {
+                    target: cast.target,
+                    until_empty: cast.auto,
+                });
+        } else {
+            events.write(CommandFireEvent {
+                attacker: entity,
+                target: cast.target,
+                queued: true,
+            });
+        }
+    }
+}
+
+/// [`crate::interaction::clear_orders`] for a direct cast; a queued one
+/// only ends the order it came from.
+fn begin_cast<'a, 'w>(
+    ec: &'a mut EntityCommands<'w>,
+    queued: bool,
+) -> &'a mut EntityCommands<'w> {
+    if queued {
+        crate::interaction::finish_active_order(ec)
+    } else {
+        crate::interaction::clear_orders(ec)
+    }
 }
 
 /// The weapons `areadenial.lua` watches (`weaponInfo`): their explosion
@@ -648,6 +702,7 @@ pub fn advance_pending_casts(
                 events.write(CommandFireEvent {
                     attacker: entity,
                     target: pending.target,
+                    queued: false,
                 });
             }
             _ if !moving => {
@@ -714,7 +769,7 @@ pub fn process_command_fire(
                 // A fresh order: drop whatever the caster was doing and
                 // walk toward the target; `advance_pending_casts` casts
                 // once it's in range.
-                crate::interaction::clear_orders(&mut commands.entity(event.attacker)).insert((
+                begin_cast(&mut commands.entity(event.attacker), event.queued).insert((
                     PendingCommandFire {
                         target: event.target,
                     },
@@ -817,7 +872,7 @@ pub fn process_command_fire(
             // turns the order into an attack command (replacing the
             // current one), and the script fires it only once the cube
             // is open and aimed — [`tick_nx_casts`] does the rest.
-            crate::interaction::clear_orders(&mut commands.entity(event.attacker)).insert(
+            begin_cast(&mut commands.entity(event.attacker), event.queued).insert(
                 NxCast::Aiming {
                     target: event.target,
                 },
@@ -1719,6 +1774,40 @@ fn ability_for(kind: UnitKind) -> Option<Ability> {
 mod tests {
     use super::*;
     use crate::sim::test_support::InitSim;
+    use bevy::ecs::system::RunSystemOnce;
+
+    /// A queued cast that reached the head: a teleporter starts its
+    /// Dispatch, a caster fires with the queue kept.
+    #[test]
+    fn a_promoted_cast_dispatches_or_fires_without_clearing_the_queue() {
+        let mut world = World::new();
+        world.init_resource::<Messages<CommandFireEvent>>();
+        let target = Vec3::new(300.0, 0.0, 0.0);
+        let cast = QueuedCast {
+            target,
+            auto: true,
+        };
+        let port = world
+            .spawn((UnitType(UnitKind::Port), NetId(1), cast))
+            .id();
+        let pointer = world
+            .spawn((UnitType(UnitKind::Pointer), NetId(2), cast))
+            .id();
+        world.run_system_once(run_queued_casts).unwrap();
+        world.flush();
+        let dispatch = world
+            .get::<crate::units::mechanics::network_buffer::DispatchOrder>(port)
+            .expect("dispatching");
+        assert!(dispatch.until_empty);
+        assert!(world.get::<QueuedCast>(port).is_none());
+        assert!(world.get::<QueuedCast>(pointer).is_none());
+        let events: Vec<_> = world
+            .resource_mut::<Messages<CommandFireEvent>>()
+            .drain()
+            .collect();
+        assert_eq!(events.len(), 1);
+        assert!(events[0].queued && events[0].attacker == pointer);
+    }
 
     #[test]
     fn nx_flag_ability_matches_upstream() {
@@ -1902,7 +1991,11 @@ mod tests {
     fn cast(app: &mut App, attacker: Entity, target: Vec3) {
         use bevy::ecs::system::RunSystemOnce;
         app.world_mut()
-            .write_message(CommandFireEvent { attacker, target });
+            .write_message(CommandFireEvent {
+                attacker,
+                target,
+                queued: false,
+            });
         app.world_mut()
             .run_system_once(process_command_fire)
             .unwrap();

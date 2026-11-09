@@ -615,6 +615,11 @@ pub trait UnitAnim: Send + Sync + 'static {
     /// Per-frame tick: looping spins, choreography timers, idle effects.
     fn update(&mut self, _rig: &mut AnimRig, _ctx: AnimCtx) {}
 
+    /// bug.bos `Deploy()` / exploit.bos `Undeploy()` once the morph
+    /// gate is open: the flip choreography that ends in the swap to the
+    /// other form (88 frames later). [`UnitAnim::update`] runs it on.
+    fn morph(&mut self, _rig: &mut AnimRig) {}
+
     /// `.bos` `StartMoving()`.
     fn start_moving(&mut self, _rig: &mut AnimRig, _ctx: AnimCtx) {}
 

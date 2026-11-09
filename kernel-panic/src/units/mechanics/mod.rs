@@ -6,6 +6,7 @@
 pub mod cloak;
 pub mod command_fire;
 pub mod deploy;
+pub mod ghost;
 pub mod network_buffer;
 pub mod shield;
 pub mod worm;

@@ -113,6 +113,11 @@ pub fn buildee_health(
 pub struct BuildDriven {
     /// Seconds since a builder last tended this frame (`lastNanoAdd`).
     pub unpowered: f32,
+    /// `CUnit::soloBuilder`: Kernel Panic's constructors are
+    /// `CanAssist=0`, so only the one that started the frame may
+    /// (re)build it — a stopped builder resumes it with a Repair order
+    /// (`CBuilderCAI::ExecuteRepair`'s `soloBuilder == owner`).
+    pub solo_builder: Option<Entity>,
 }
 
 /// An emerge fade's state: the alpha step the unit's pieces wear

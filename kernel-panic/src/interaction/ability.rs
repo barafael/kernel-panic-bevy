@@ -344,6 +344,7 @@ pub(crate) fn launch_mines(
         units,
         target: NetPos::quantize(Vec3::ZERO),
         auto: false,
+        queue: false,
     });
 }
 
@@ -359,6 +360,7 @@ pub(crate) fn cast_aimed_abilities(
     units: impl IntoIterator<Item = (Entity, UnitKind)>,
     target: Vec3,
     alt_held: bool,
+    queue: bool,
     net: &mut Issue,
     commands: &mut Commands,
 ) {
@@ -373,6 +375,7 @@ pub(crate) fn cast_aimed_abilities(
         units,
         target: NetPos::quantize(target),
         auto: alt_held,
+        queue,
     });
 }
 
@@ -443,6 +446,7 @@ fn trigger_ability_click(
             .filter(|(_, k)| filter.is_none_or(|f| f(*k))),
         target,
         alt_held(&keys),
+        shift_held(&keys),
         &mut net,
         &mut commands,
     );

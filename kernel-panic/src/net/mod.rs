@@ -376,10 +376,14 @@ pub enum SimCommand {
     },
     /// Aimed abilities at a point: command-fire casts, Dispatch
     /// (`auto` = Alt, keep dispatching until the buffer is empty).
+    ///
+    /// `queue` (Shift): behind the unit's orders instead of now, the way
+    /// a Lua command waits its turn at the head of the queue.
     Cast {
         units: Units,
         target: NetPos,
         auto: bool,
+        queue: bool,
     },
     // M1. New variants go at the end: postcard encodes the variant
     // index, and recorded replays must keep decoding.

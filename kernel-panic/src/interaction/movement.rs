@@ -204,12 +204,20 @@ pub enum QueuedCommand {
         target: Entity,
         pos: Vec3,
     },
+    /// An aimed ability (NX Flag, SIGTERM, Obelisk Infection, Firewall,
+    /// Dispatch) cast at `pos` when its turn comes (Shift-queued Lua
+    /// command: `CommandFallback` runs at the head of the queue).
+    Cast {
+        pos: Vec3,
+        auto: bool,
+    },
 }
 
 impl QueuedCommand {
     pub fn position(&self) -> Vec3 {
         match self {
             QueuedCommand::Move(p) | QueuedCommand::Patrol(p) | QueuedCommand::AttackMove(p) => *p,
+            QueuedCommand::Cast { pos, .. } => *pos,
             QueuedCommand::AttackUnit { pos, .. }
             | QueuedCommand::Guard { pos, .. }
             | QueuedCommand::ClearFeature { pos, .. }
@@ -547,6 +555,7 @@ pub struct OrderState {
     bombard: Has<crate::units::mechanics::deploy::BombardOrder>,
     entering: Has<crate::units::mechanics::network_buffer::EnterOrder>,
     dispatching: Has<crate::units::mechanics::network_buffer::DispatchOrder>,
+    queued_cast: Has<crate::units::mechanics::command_fire::QueuedCast>,
     /// A fight leg turned aside to attack: the leg is still the order.
     fight_detour: Has<crate::units::combat::engage::FightGoal>,
 }
@@ -554,7 +563,11 @@ pub struct OrderState {
 impl OrderStateItem<'_, '_> {
     /// The unit is executing an order.
     pub fn active(&self) -> bool {
-        self.move_target || self.steers() || self.dispatching || self.fight_detour
+        self.move_target
+            || self.steers()
+            || self.dispatching
+            || self.queued_cast
+            || self.fight_detour
     }
 
     /// The active order is one that steers the unit through a
@@ -643,7 +656,8 @@ pub(crate) fn promote_next_command(
         | QueuedCommand::ClearArea { .. }
         | QueuedCommand::Bombard { .. }
         | QueuedCommand::Repair { .. }
-        | QueuedCommand::Enter { .. } => None,
+        | QueuedCommand::Enter { .. }
+        | QueuedCommand::Cast { .. } => None,
         c => Some(c.position()),
     }
 }
@@ -1160,7 +1174,7 @@ pub fn draw_selected_command_lines(
                 QueuedCommand::AttackGround(_) => FIGHT_COLOR,
                 QueuedCommand::Guard { .. } => GUARD_COLOR,
                 QueuedCommand::ClearFeature { .. } | QueuedCommand::ClearArea { .. } => CLEAR_COLOR,
-                QueuedCommand::Bombard { .. } => BOMBARD_COLOR,
+                QueuedCommand::Bombard { .. } | QueuedCommand::Cast { .. } => BOMBARD_COLOR,
             };
             draw_dashed_polyline(gizmos, &[prev, to], color, hm);
             gizmos
@@ -1387,7 +1401,7 @@ pub fn draw_selected_factory_orders(
                 | QueuedCommand::Repair { .. }
                 | QueuedCommand::Enter { .. } => MOVE_COLOR,
                 QueuedCommand::ClearFeature { .. } | QueuedCommand::ClearArea { .. } => CLEAR_COLOR,
-                QueuedCommand::Bombard { .. } => BOMBARD_COLOR,
+                QueuedCommand::Bombard { .. } | QueuedCommand::Cast { .. } => BOMBARD_COLOR,
             };
             let to = sample_at_ground(pos.x, pos.z, hm);
             draw_dashed_polyline(&mut gizmos, &[prev, to], color, hm);
