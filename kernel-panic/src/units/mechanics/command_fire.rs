@@ -503,12 +503,12 @@ pub fn run_queued_casts(
     for (entity, unit, cast, _) in casters.iter().sort::<&NetId>() {
         commands.entity(entity).remove::<QueuedCast>();
         if unit.0.is_teleporter() {
-            commands
-                .entity(entity)
-                .insert(crate::units::mechanics::network_buffer::DispatchOrder {
+            commands.entity(entity).insert(
+                crate::units::mechanics::network_buffer::DispatchOrder {
                     target: cast.target,
                     until_empty: cast.auto,
-                });
+                },
+            );
         } else {
             events.write(CommandFireEvent {
                 attacker: entity,
@@ -521,10 +521,7 @@ pub fn run_queued_casts(
 
 /// [`crate::interaction::clear_orders`] for a direct cast; a queued one
 /// only ends the order it came from.
-fn begin_cast<'a, 'w>(
-    ec: &'a mut EntityCommands<'w>,
-    queued: bool,
-) -> &'a mut EntityCommands<'w> {
+fn begin_cast<'a, 'w>(ec: &'a mut EntityCommands<'w>, queued: bool) -> &'a mut EntityCommands<'w> {
     if queued {
         crate::interaction::finish_active_order(ec)
     } else {
@@ -872,11 +869,9 @@ pub fn process_command_fire(
             // turns the order into an attack command (replacing the
             // current one), and the script fires it only once the cube
             // is open and aimed — [`tick_nx_casts`] does the rest.
-            begin_cast(&mut commands.entity(event.attacker), event.queued).insert(
-                NxCast::Aiming {
-                    target: event.target,
-                },
-            );
+            begin_cast(&mut commands.entity(event.attacker), event.queued).insert(NxCast::Aiming {
+                target: event.target,
+            });
             continue;
         }
 
@@ -1783,13 +1778,8 @@ mod tests {
         let mut world = World::new();
         world.init_resource::<Messages<CommandFireEvent>>();
         let target = Vec3::new(300.0, 0.0, 0.0);
-        let cast = QueuedCast {
-            target,
-            auto: true,
-        };
-        let port = world
-            .spawn((UnitType(UnitKind::Port), NetId(1), cast))
-            .id();
+        let cast = QueuedCast { target, auto: true };
+        let port = world.spawn((UnitType(UnitKind::Port), NetId(1), cast)).id();
         let pointer = world
             .spawn((UnitType(UnitKind::Pointer), NetId(2), cast))
             .id();
@@ -1945,7 +1935,11 @@ mod tests {
         let protected = |e| world.get::<Protected>(e).map(|p| p.remaining);
         assert_eq!(protected(on_ground), Some(FIREWALL_DURATION));
         assert_eq!(protected(flying), Some(FIREWALL_DURATION));
-        assert_eq!(protected(beyond), None, "300 elmos on the plane is the edge");
+        assert_eq!(
+            protected(beyond),
+            None,
+            "300 elmos on the plane is the edge"
+        );
         assert_eq!(protected(enemy), None, "only the caster's ally team");
     }
 
@@ -1990,12 +1984,11 @@ mod tests {
 
     fn cast(app: &mut App, attacker: Entity, target: Vec3) {
         use bevy::ecs::system::RunSystemOnce;
-        app.world_mut()
-            .write_message(CommandFireEvent {
-                attacker,
-                target,
-                queued: false,
-            });
+        app.world_mut().write_message(CommandFireEvent {
+            attacker,
+            target,
+            queued: false,
+        });
         app.world_mut()
             .run_system_once(process_command_fire)
             .unwrap();

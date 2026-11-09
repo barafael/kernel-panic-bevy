@@ -2661,8 +2661,22 @@ pub fn ground_collision_system(
     crushed.clear();
     knocked.clear();
 
-    for (entity, kind, stats, mut tf, mut m, path, _, mut queue, dying, lift, emerging, order, _, _) in
-        movers.iter_mut().sort::<&NetId>()
+    for (
+        entity,
+        kind,
+        stats,
+        mut tf,
+        mut m,
+        path,
+        _,
+        mut queue,
+        dying,
+        lift,
+        emerging,
+        order,
+        _,
+        _,
+    ) in movers.iter_mut().sort::<&NetId>()
     {
         if stats.can_fly || stats.speed <= 0.0 || dying || emerging {
             continue;
@@ -3889,7 +3903,10 @@ mod tests {
         // ground speed at `max · cos / (0.05 + cos)` (~0.945 of it at 30°).
         let cos = ops::cos(30.0_f32.to_radians());
         let downhill = 90.0 * cos / (0.05 + cos);
-        assert!((down - downhill).abs() < 0.5, "downhill {down} vs {downhill}");
+        assert!(
+            (down - downhill).abs() < 0.5,
+            "downhill {down} vs {downhill}"
+        );
     }
 
     /// Idle units follow sinking terrain down (Hex Farm) instead of

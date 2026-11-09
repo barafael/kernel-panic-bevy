@@ -122,7 +122,10 @@ impl OrderCursorModes {
 }
 
 /// A mode a Shift-click kept armed ends with the Shift key.
-fn disarm_when_shift_released(mut modes: ResMut<OrderCursorModes>, keys: Res<ButtonInput<KeyCode>>) {
+fn disarm_when_shift_released(
+    mut modes: ResMut<OrderCursorModes>,
+    keys: Res<ButtonInput<KeyCode>>,
+) {
     if modes.needs_shift && !shift_held(&keys) {
         modes.clear();
     }

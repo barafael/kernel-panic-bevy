@@ -89,7 +89,10 @@ fn decode(data: &[u8]) -> Result<Vec<u8>, String> {
             .read_to_end(&mut out)
             .map_err(|e| format!("block {i}: {e}"))?;
         if out.len() - before != want {
-            return Err(format!("block {i}: {} bytes, expected {want}", out.len() - before));
+            return Err(format!(
+                "block {i}: {} bytes, expected {want}",
+                out.len() - before
+            ));
         }
     }
     Ok(out)
@@ -135,7 +138,10 @@ mod tests {
     fn stored_blocks_holes_and_a_short_last_block() {
         let first = vec![7u8; 2048];
         let last = b"tail".to_vec();
-        let d = zisofs(2048 * 2 + 4, &[Some(first.clone()), None, Some(last.clone())]);
+        let d = zisofs(
+            2048 * 2 + 4,
+            &[Some(first.clone()), None, Some(last.clone())],
+        );
         let out = decode(&d).unwrap();
         assert_eq!(out.len(), 2048 * 2 + 4);
         assert_eq!(out[..2048], first[..]);

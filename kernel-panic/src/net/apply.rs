@@ -1353,10 +1353,10 @@ impl ApplyCtx<'_, '_> {
                 };
                 for &site in sites {
                     queue_build(&mut active, &mut queued, &mut slot, kind, site, |k| {
-                            self.registry
-                                .as_ref()
-                                .map_or(Vec2::splat(32.0), |r| r.footprint_elmos(k))
-                        });
+                        self.registry
+                            .as_ref()
+                            .map_or(Vec2::splat(32.0), |r| r.footprint_elmos(k))
+                    });
                 }
                 let mut ec = self.commands.entity(e);
                 if running.is_some() && active.is_none() {
@@ -2005,15 +2005,15 @@ mod tests {
             world.get::<EnterOrder>(packet).is_none(),
             "a Bit is no door"
         );
-        world
-            .entity_mut(port)
-            .insert(crate::units::combat::Stunned);
+        world.entity_mut(port).insert(crate::units::combat::Stunned);
         send(&mut world, 0, vec![enter(mine)]);
         assert!(
             world.get::<EnterOrder>(packet).is_none(),
             "a stunned teleporter refuses"
         );
-        world.entity_mut(port).remove::<crate::units::combat::Stunned>();
+        world
+            .entity_mut(port)
+            .remove::<crate::units::combat::Stunned>();
         send(&mut world, 0, vec![enter(mine)]);
         assert_eq!(
             world.get::<EnterOrder>(packet).map(|o| o.target),

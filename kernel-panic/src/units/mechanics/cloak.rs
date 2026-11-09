@@ -875,8 +875,20 @@ mod tests {
         // An Assembler far away at x = 5000 with a plain enemy just
         // beyond its sight and a mine inside its radar.
         let asm = unit(&mut world, UnitKind::Assembler, 0, 5000.0, false);
-        let blip = unit(&mut world, UnitKind::Bit, 1, 5000.0 + asm_sight + 60.0, false);
-        let buried = unit(&mut world, UnitKind::LogicBomb, 1, 5000.0 + asm_sight + 60.0, true);
+        let blip = unit(
+            &mut world,
+            UnitKind::Bit,
+            1,
+            5000.0 + asm_sight + 60.0,
+            false,
+        );
+        let buried = unit(
+            &mut world,
+            UnitKind::LogicBomb,
+            1,
+            5000.0 + asm_sight + 60.0,
+            true,
+        );
         world.insert_resource(registry);
         world.insert_resource(spatial);
         world.run_system_once(update_cloak_detection).unwrap();
@@ -890,7 +902,11 @@ mod tests {
         assert_eq!(masks(&world, far), (false, false), "beyond sight");
         assert_eq!(masks(&world, mine), (false, false), "cloaked is never seen");
         assert_eq!(masks(&world, blip), (false, true), "radar only");
-        assert_eq!(masks(&world, buried), (false, true), "radar shows the cloaked");
+        assert_eq!(
+            masks(&world, buried),
+            (false, true),
+            "radar shows the cloaked"
+        );
         assert!(world.get::<DetectedBy>(buried).unwrap().contains(0));
         assert!(!world.get::<DetectedBy>(mine).unwrap().contains(0));
         // The other team has its own unit in its own sight.

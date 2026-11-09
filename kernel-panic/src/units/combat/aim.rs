@@ -157,7 +157,8 @@ pub fn cannon_wanted_dir_arc(target_vec: Vec3, speed: f32, gravity: f32, high: b
         let vsq = v * v;
         let root1 = vsq * vsq + 2.0 * vsq * g * dy - g * g * dfsq;
         if root1 >= 0.0 {
-            let root2 = 2.0 * dfsq * dsq * (vsq + g * dy + if high { -root1.sqrt() } else { root1.sqrt() });
+            let root2 =
+                2.0 * dfsq * dsq * (vsq + g * dy + if high { -root1.sqrt() } else { root1.sqrt() });
             if root2 >= 0.0 {
                 vxz = root2.sqrt() / (2.0 * dsq);
                 vy = if dxz == 0.0 || vxz == 0.0 {

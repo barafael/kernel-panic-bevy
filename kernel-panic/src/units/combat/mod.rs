@@ -52,8 +52,8 @@ pub use aim::{
 };
 pub use damage::{
     Armored, Attacker, BurstFire, BurstRng, DamageQueue, DelayedDamage, Hit, Infected,
-    PendingDamage, VirusSpawn, VirusSpawnQueue, apply_damage, apply_death_blasts, tick_burst_fire, tick_infections,
-    update_armored,
+    PendingDamage, VirusSpawn, VirusSpawnQueue, apply_damage, apply_death_blasts, tick_burst_fire,
+    tick_infections, update_armored,
 };
 pub use lifecycle::{
     Dying, PARALYZE_DECLINE, SelfDestructCountdown, Stunned, auto_heal, cleanup_dying,
@@ -360,7 +360,9 @@ impl TargetCachePick<'_, '_> {
     /// The collision radius of `target` (0 when it is gone): the surface
     /// a melee weapon's range is measured to.
     fn hit_radius_of(&self, target: Entity) -> f32 {
-        self.alive.get(target).map_or(0.0, |(_, stats)| stats.hit_radius)
+        self.alive
+            .get(target)
+            .map_or(0.0, |(_, stats)| stats.hit_radius)
     }
 
     /// Aim position of `target` — its model midpoint, `unit->aimPos`
@@ -834,7 +836,10 @@ pub(crate) fn salvo_frames(weapon_def: &spring_tdf::WeaponDef) -> u64 {
 }
 
 /// The cooldown after a shot: the reload, or the salvo if it is longer.
-pub(crate) fn cooldown_after_shot(frame: u64, weapon_def: &spring_tdf::WeaponDef) -> AttackCooldown {
+pub(crate) fn cooldown_after_shot(
+    frame: u64,
+    weapon_def: &spring_tdf::WeaponDef,
+) -> AttackCooldown {
     let reload = AttackCooldown::after_reload(frame, weapon_def.reload_time);
     AttackCooldown {
         ready_frame: reload.ready_frame.max(frame + salvo_frames(weapon_def)),
@@ -1170,8 +1175,8 @@ pub fn combat_system(
             .filter(|l| l.frame + 200 <= frame)
             .map(|l| l.entity);
         // `secDamage`: the weapon's damage per second.
-        let sec_damage =
-            weapon_def.damage.default * weapon_def.burst.det_max(1.0) / weapon_def.reload_time.det_max(0.01);
+        let sec_damage = weapon_def.damage.default * weapon_def.burst.det_max(1.0)
+            / weapon_def.reload_time.det_max(0.01);
         let weapon_range = weapon_def.effective_range();
         // A user target in range whose line of fire is blocked by an
         // ally: keep tracking it, and — as `AllowWeaponAutoTarget` lets
@@ -1469,10 +1474,9 @@ pub fn combat_system(
         if pieces.muzzle_buried(entity, attacker_gtf) {
             continue;
         }
-        commands.entity(entity).insert((
-            cooldown_after_shot(frame, weapon_def),
-            JustFired,
-        ));
+        commands
+            .entity(entity)
+            .insert((cooldown_after_shot(frame, weapon_def), JustFired));
         if let Some(weapon) = weapon {
             open_salvo(
                 SalvoShot {
@@ -1792,11 +1796,9 @@ pub fn attack_ground_system(
             aim_from,
             order.pos,
             pieces.map_gravity(),
-        )
-            || !free_line_of_fire(
-                weapon_def, &spatial, &alliances, entity, team.0, aim_from, order.pos,
-            )
-        {
+        ) || !free_line_of_fire(
+            weapon_def, &spatial, &alliances, entity, team.0, aim_from, order.pos,
+        ) {
             let mobile = stats.is_some_and(|s| s.speed > 0.0);
             if mobile && move_target.is_none_or(|t| t.0.distance(order.pos) > CHASE_REPATH_DISTANCE)
             {
@@ -1874,10 +1876,9 @@ pub fn attack_ground_system(
         }
         // Fire.
         let is_traveling = weapon_def.is_traveling();
-        commands.entity(entity).insert((
-            cooldown_after_shot(frame, weapon_def),
-            JustFired,
-        ));
+        commands
+            .entity(entity)
+            .insert((cooldown_after_shot(frame, weapon_def), JustFired));
         // The salvo's remaining shots go through `BurstFire` exactly like
         // `combat_system`'s — a player-commanded byte fires its authored
         // 4-shot MegaBeam burst, not one shot per reload. Attack-ground
@@ -2050,7 +2051,10 @@ pub fn attack_target_system(
         let target_mid = target_stats.map_or(0.0, |s| s.mid_y);
         let aim_from = stats.mid_pos(gtf);
         let aim_at = if blip {
-            radar_blip(crate::units::components::mid_pos(target_gtf, target_mid), tick.0)
+            radar_blip(
+                crate::units::components::mid_pos(target_gtf, target_mid),
+                tick.0,
+            )
         } else {
             crate::units::components::mid_pos(target_gtf, target_mid)
         };

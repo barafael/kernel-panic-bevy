@@ -898,7 +898,9 @@ impl DamagePass<'_, '_> {
             let damage = self
                 .target_unit_q
                 .get(target)
-                .map_or(weapon_def.damage.default * dyn_mult * pending.scale, |ut| base(ut.0));
+                .map_or(weapon_def.damage.default * dyn_mult * pending.scale, |ut| {
+                    base(ut.0)
+                });
             let impulse = self
                 .target_pos_q
                 .get(target)
@@ -1522,9 +1524,12 @@ mod tests {
         let first = unit(&mut app, UnitKind::Virus, 1, Vec3::X * 300.0, 100.0);
         let second = unit(&mut app, UnitKind::Virus, 2, Vec3::Z * 300.0, 100.0);
         for attacker in [first, second] {
-            app.world_mut()
-                .resource_mut::<DamageQueue>()
-                .push(shot(Some(victim), attacker, beam, Vec3::ZERO));
+            app.world_mut().resource_mut::<DamageQueue>().push(shot(
+                Some(victim),
+                attacker,
+                beam,
+                Vec3::ZERO,
+            ));
         }
         run_damage(&mut app);
         assert_eq!(hp(&app, victim), -50.0, "the lethal hit only");

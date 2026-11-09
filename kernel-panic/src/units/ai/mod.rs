@@ -718,7 +718,10 @@ fn run_constructors(
             .collect();
         let mut i = 0;
         while i < s.vents.len() {
-            if own.iter().any(|p| flat_dist_sq(*p, s.vents[i].1) <= claim_sq) {
+            if own
+                .iter()
+                .any(|p| flat_dist_sq(*p, s.vents[i].1) <= claim_sq)
+            {
                 held.push(s.vents.remove(i));
             } else {
                 i += 1;
