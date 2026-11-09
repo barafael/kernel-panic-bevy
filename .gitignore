@@ -29,3 +29,6 @@ trace-*.json
 
 # Replay trails the `--replay` CLI writes (`headless::cli`, `--trail-dir`)
 /trails
+
+# Claude Code scheduler lock (per session, recreated on start)
+/.claude/scheduled_tasks.lock

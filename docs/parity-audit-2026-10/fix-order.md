@@ -61,8 +61,9 @@ Worm bite range to the near surface, yardmap facing, morph timing.
 
 ## Status (2026-11-09)
 
-Batches 1-5 are in commits 03c1723 and 6755798 (SIM_VERSION 21, 22); the
-follow-up pass (SIM_VERSION 23) adds builder repair (`Order::Repair`,
+Batch 0 is commit 03c1723 (SIM_VERSION 21), batches 1-4 are 6755798
+(SIM_VERSION 22), and batch 5 plus the follow-up pass are 6233d1c
+(SIM_VERSION 23), which adds builder repair (`Order::Repair`,
 right-click on a damaged friend), the timed Bug <-> Exploit morph
 (`morphable` / `idle` gates, 88 silent frames, heading and queue kept),
 the Virus release on a finished infected frame, melee range to the target's
