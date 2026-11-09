@@ -446,6 +446,7 @@ pub fn update_structure_layer(
         &Transform,
         Has<Dying>,
         Has<StructureStamped>,
+        Has<super::ground_move::Unblocked>,
     )>,
     all: Query<(Entity, &NetId), With<UnitType>>,
     spawned: Query<(Entity, &NetId), Added<UnitType>>,
@@ -480,10 +481,11 @@ pub fn update_structure_layer(
     };
     candidates.sort_by_key(|(_, id)| **id);
     for (entity, _) in candidates {
-        let Ok((kind, stats, tf, dying, stamped)) = units.get(entity) else {
+        let Ok((kind, stats, tf, dying, stamped, unblocked)) = units.get(entity) else {
             continue;
         };
-        if stats.speed > 0.0 || stats.can_fly || dying {
+        // `SetUnitBlocking(false)`: never on the blocking map.
+        if stats.speed > 0.0 || stats.can_fly || dying || unblocked {
             continue;
         }
         if stamped {

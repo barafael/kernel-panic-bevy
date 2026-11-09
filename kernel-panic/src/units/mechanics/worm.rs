@@ -26,6 +26,7 @@ use crate::units::ai::AiSeats;
 use crate::units::combat::{AimTarget, DamageQueue, Dying, PendingDamage};
 use crate::units::components::{TeamId, UnitStats, UnitType};
 use crate::units::content::weapons::WeaponKind;
+use crate::units::lifecycle::bookkeeping::{Detector, SeismicDetector};
 use crate::units::mechanics::cloak::Cloaked;
 
 /// Upstream `ResetAim`: `sleep 2000`, then `move head to y-axis [-16]
@@ -76,6 +77,53 @@ pub struct CloakWhenBuilt {
 /// `5000/33 + 1` frames), the head retracts for `sleep 1333` (41
 /// frames), then `set WANT_CLOAK`: 193 frames in all.
 pub const WORM_CLOAK_DELAY: f32 = (5000 / 33 + 1 + 1333 / 33 + 1) as f32 / 30.0;
+
+/// worm.bos `Create` after the build: `sleep 5000` (152 frames), then
+/// `set ACTIVATION to 1`.
+pub const WORM_ACTIVATION_DELAY: f32 = (5000 / 33 + 1) as f32 / 30.0;
+
+/// A unit whose radar and seismic sensors are still off: the engine
+/// blocks every sensor of a deactivated unit (`LosHandler.cpp:182`), and
+/// the Worm's script activates 5 s after it is finished. Turns into
+/// [`Detector`] / [`SeismicDetector`] then.
+#[derive(Component, Clone, Copy, Debug)]
+pub struct SensorsPending {
+    pub delay: f32,
+    pub radar: f32,
+    pub seismic: f32,
+}
+
+/// Switch the sensors on for units whose activation delay ran out.
+#[allow(clippy::type_complexity)]
+pub fn activate_pending_sensors(
+    time: Res<Time>,
+    mut waiting: Query<
+        (Entity, &mut SensorsPending),
+        (
+            Without<crate::units::lifecycle::spawning::Emerging>,
+            Without<Dying>,
+        ),
+    >,
+    mut commands: Commands,
+) {
+    let dt = time.delta_secs();
+    for (entity, mut wait) in &mut waiting {
+        wait.delay -= dt;
+        if wait.delay > 0.0 {
+            continue;
+        }
+        let mut unit = commands.entity(entity);
+        unit.try_remove::<SensorsPending>();
+        if wait.radar > 0.0 {
+            unit.try_insert(Detector { radius: wait.radar });
+        }
+        if wait.seismic > 0.0 {
+            unit.try_insert(SeismicDetector {
+                radius: wait.seismic,
+            });
+        }
+    }
+}
 
 /// Cloak the finished units that were waiting for it.
 #[allow(clippy::type_complexity)]
@@ -217,6 +265,32 @@ mod tests {
             turn_rate: 3.0,
             can_fly: false,
         }
+    }
+
+    /// worm.bos `ACTIVATION`: the radar and the seismic sense switch on
+    /// only once the 5 s after the build ran out.
+    #[test]
+    fn sensors_wake_five_seconds_after_the_build() {
+        let mut app = App::new();
+        app.init_resource::<Time>();
+        let pending = |delay| SensorsPending {
+            delay,
+            radar: 256.0,
+            seismic: 1024.0,
+        };
+        let early = app.world_mut().spawn(pending(2.0)).id();
+        let due = app.world_mut().spawn(pending(0.0)).id();
+        app.world_mut()
+            .run_system_once(activate_pending_sensors)
+            .unwrap();
+        assert!(app.world().get::<SensorsPending>(early).is_some());
+        assert!(app.world().get::<Detector>(early).is_none());
+        assert!(app.world().get::<SensorsPending>(due).is_none());
+        assert_eq!(app.world().get::<Detector>(due).map(|d| d.radius), Some(256.0));
+        assert_eq!(
+            app.world().get::<SeismicDetector>(due).map(|d| d.radius),
+            Some(1024.0)
+        );
     }
 
     #[test]

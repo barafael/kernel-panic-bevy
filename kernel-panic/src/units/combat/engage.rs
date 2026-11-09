@@ -72,6 +72,30 @@ fn holds_position(kind: UnitKind) -> bool {
     matches!(kind, UnitKind::Pointer)
 }
 
+/// `STANDINGFIREORDERS = 0` (`FIRESTATE_HOLDFIRE`): the one fire state
+/// the game sets — worm.bos, cloaked with AutoHold on. A unit holding
+/// fire neither walks off after a visible enemy while idle
+/// (`CMobileCAI::SlowUpdate`'s `fireState >= FIREATWILL`) nor diverts
+/// a Fight.
+mod holds_fire {
+    use crate::units::mechanics::cloak::Cloaked;
+    use crate::units::mechanics::worm::AutoHold;
+    use bevy::ecs::query::QueryData;
+    use bevy::prelude::*;
+
+    #[derive(QueryData)]
+    pub struct HoldFire {
+        autohold: Option<&'static AutoHold>,
+        cloaked: Has<Cloaked>,
+    }
+
+    impl HoldFireItem<'_, '_> {
+        pub fn holds(&self) -> bool {
+            self.cloaked && self.autohold.is_some_and(|a| a.0)
+        }
+    }
+}
+
 /// Give every idle unit with a visible enemy just beyond its reach an
 /// attack order on the nearest one, on the unit's own slow update.
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
@@ -87,6 +111,7 @@ pub fn idle_engage_system(
             &NetId,
             OrderState,
             Option<&CommandQueue>,
+            holds_fire::HoldFire,
         ),
         (
             Without<Dying>,
@@ -104,8 +129,9 @@ pub fn idle_engage_system(
 ) {
     let frame = tick.frame();
     let map_gravity = gravity.as_deref().copied().unwrap_or_default().0;
-    for (entity, unit, stats, team, tf, net, order, queue) in &units {
+    for (entity, unit, stats, team, tf, net, order, queue, hold) in &units {
         if !slow_update_due(frame, net.0)
+            || hold.holds()
             || stats.speed <= 0.0
             || holds_position(unit.0)
             || order.active()
@@ -212,6 +238,7 @@ pub fn fight_divert_system(
             &Transform,
             &NetId,
             &MoveTarget,
+            holds_fire::HoldFire,
         ),
         (
             With<crate::interaction::movement::AttackMoveActive>,
@@ -231,8 +258,8 @@ pub fn fight_divert_system(
 ) {
     let frame = tick.frame();
     let map_gravity = gravity.as_deref().copied().unwrap_or_default().0;
-    for (entity, unit, stats, team, tf, net, goal) in &units {
-        if !slow_update_due(frame, net.0) || stats.speed <= 0.0 {
+    for (entity, unit, stats, team, tf, net, goal, hold) in &units {
+        if !slow_update_due(frame, net.0) || stats.speed <= 0.0 || hold.holds() {
             continue;
         }
         let Some(weapon) = unit_registry
@@ -378,6 +405,38 @@ mod tests {
             rig.world.get::<AttackTargetOrder>(unit).is_none(),
             "inside reach the weapon fires by itself"
         );
+    }
+
+    /// A cloaked Worm with AutoHold on (`STANDINGFIREORDERS = 0`) stays
+    /// put; with AutoHold off, or once it surfaced, it engages.
+    #[test]
+    fn a_worm_holding_fire_does_not_engage() {
+        use crate::units::mechanics::cloak::Cloaked;
+        use crate::units::mechanics::worm::AutoHold;
+        let weapons = WeaponRegistry::load();
+        let registry = UnitRegistry::load();
+        let reach = weapons
+            .get(registry.weapon(UnitKind::Worm).expect("armed"))
+            .expect("weapon")
+            .effective_range();
+        let gap = reach + 100.0;
+        for (autohold, cloaked, engages) in [
+            (true, true, false),
+            (false, true, true),
+            (true, false, true),
+        ] {
+            let (mut rig, unit, _) = rig(UnitKind::Worm, gap);
+            rig.world.entity_mut(unit).insert(AutoHold(autohold));
+            if cloaked {
+                rig.world.entity_mut(unit).insert(Cloaked);
+            }
+            rig.world.run_system_once(idle_engage_system).unwrap();
+            assert_eq!(
+                rig.world.get::<AttackTargetOrder>(unit).is_some(),
+                engages,
+                "autohold {autohold}, cloaked {cloaked}"
+            );
+        }
     }
 
     fn rig_at(kind: UnitKind, enemy_x: f32) -> (Rig, Entity, Entity) {

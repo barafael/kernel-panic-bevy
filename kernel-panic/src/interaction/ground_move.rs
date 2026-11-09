@@ -1644,6 +1644,7 @@ pub struct MoverData {
     animator: Option<&'static crate::units::assets::animation::UnitAnimator>,
     order: OrderState,
     emerging: Has<crate::units::lifecycle::spawning::Emerging>,
+    unblocked: Has<Unblocked>,
     lift: Option<&'static GroundLift>,
     team: Option<&'static TeamId>,
     /// Iteration order (`sim`).
@@ -1729,6 +1730,7 @@ pub fn movement_system(
             moving: m.is_moving(),
             crushable: false,
             flying: m.flying,
+            blocking: !u.unblocked,
         });
     }
     let no_alliances = crate::units::teams::Alliances::default();
@@ -2093,6 +2095,47 @@ pub fn movement_system(
     }
 }
 
+/// `Spring.SetUnitBlocking(unit, false)`: the unit left the ground
+/// blocking map, so nothing collides with it, avoids it or paths round
+/// it (`CMoveMath::IsNonBlocking`). The Bug/Exploit morph (`LuaCOB.lua`'s
+/// replace queue) makes its result so; a mobile one is blocking again as
+/// soon as a slow update finds it on another map square
+/// (`CMoveType::SlowUpdate` → `Block()`), a building (the Exploit) never
+/// is.
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Unblocked {
+    /// The 8-elmo map square it was created on (`CUnit::mapSquare`).
+    pub square: IVec2,
+}
+
+impl Unblocked {
+    pub fn at(pos: Vec3) -> Self {
+        Self {
+            square: map_square(pos),
+        }
+    }
+}
+
+fn map_square(pos: Vec3) -> IVec2 {
+    IVec2::new(
+        (pos.x / SQUARE_SIZE).floor() as i32,
+        (pos.z / SQUARE_SIZE).floor() as i32,
+    )
+}
+
+/// `CMoveType::SlowUpdate`: a unit that reached a new map square since
+/// its last slow update blocks again.
+pub fn reblock_moved_units(
+    movers: Query<(Entity, &Unblocked, &Transform, &GroundMover), Without<Dying>>,
+    mut commands: Commands,
+) {
+    for (entity, unblocked, tf, mover) in &movers {
+        if mover.is_slow_update() && map_square(tf.translation) != unblocked.square {
+            commands.entity(entity).try_remove::<Unblocked>();
+        }
+    }
+}
+
 /// Another ground mover as obstacle avoidance sees it.
 #[derive(Clone, Copy)]
 pub struct Avoidee {
@@ -2112,6 +2155,8 @@ pub struct Avoidee {
     crushable: bool,
     /// `IsInAir() || IsFlying()`: launched by an impulse — not avoided.
     flying: bool,
+    /// Off the blocking map ([`Unblocked`]): not avoided.
+    blocking: bool,
 }
 
 /// The avoider's own identity for [`obstacle_avoidance_dir`].
@@ -2181,7 +2226,7 @@ pub fn obstacle_avoidance_dir(
             };
             for &i in bucket {
                 let o = &view.entries[i];
-                if o.entity == me.entity || o.crushable || o.flying {
+                if o.entity == me.entity || o.crushable || o.flying || !o.blocking {
                     continue;
                 }
                 if o.pos.distance_squared(me.pos) > avoidance_radius * avoidance_radius {
@@ -2372,6 +2417,9 @@ pub struct CollisionEntry {
     /// `IsSkidding()`: skipped by the normal collision pass; met only
     /// through `CheckCollisionSkid`.
     skidding: bool,
+    /// Still on the ground blocking map: an [`Unblocked`] collidee
+    /// neither pushes nor stops anyone (`IsNonBlocking`).
+    blocking: bool,
     /// `owner->speed` and the model radius, for `CheckCollisionSkid`.
     vel: Vec3,
     hit_radius: f32,
@@ -2476,6 +2524,7 @@ pub fn ground_collision_system(
         Has<crate::units::lifecycle::spawning::Emerging>,
         OrderState,
         &NetId,
+        Has<Unblocked>,
     )>,
     features: Query<
         (Entity, &Transform, &crate::units::features::Feature, &NetId),
@@ -2514,7 +2563,7 @@ pub fn ground_collision_system(
     // Unit-id order, here and in the pass below: the snapshot index
     // breaks ties between colliders, and every unit's response sees the
     // positions the units before it reached (`sim`).
-    for (entity, _, stats, tf, m, path, has_target, queue, dying, _, emerging, _, _) in
+    for (entity, _, stats, tf, m, path, has_target, queue, dying, _, emerging, _, _, unblocked) in
         movers.iter().sort::<&NetId>()
     {
         if stats.can_fly || dying {
@@ -2549,6 +2598,7 @@ pub fn ground_collision_system(
             curr_waypoint,
             being_built: emerging,
             skidding: m.skidding,
+            blocking: !unblocked,
             vel: m.velocity,
             hit_radius: stats.hit_radius,
         });
@@ -2593,6 +2643,7 @@ pub fn ground_collision_system(
             curr_waypoint: None,
             being_built: false,
             skidding: false,
+            blocking: true,
             vel: Vec3::ZERO,
             hit_radius: crate::units::features::Feature::HIT_RADIUS,
         });
@@ -2610,7 +2661,7 @@ pub fn ground_collision_system(
     crushed.clear();
     knocked.clear();
 
-    for (entity, kind, stats, mut tf, mut m, path, _, mut queue, dying, lift, emerging, order, _) in
+    for (entity, kind, stats, mut tf, mut m, path, _, mut queue, dying, lift, emerging, order, _, _) in
         movers.iter_mut().sort::<&NetId>()
     {
         if stats.can_fly || stats.speed <= 0.0 || dying || emerging {
@@ -2691,6 +2742,7 @@ pub fn ground_collision_system(
                         // collidees are met only through their own skid.
                         if o.entity == entity
                             || o.skidding
+                            || !o.blocking
                             || (pos3 - o.pos3).length_squared() - (r1 + r2) * (r1 + r2) > 0.01
                         {
                             continue;
@@ -3013,6 +3065,36 @@ mod tests {
         let reg = UnitRegistry::load();
         let stats = UnitStats::from_registry(UnitKind::Bit, &reg, 20.0, 0.0);
         FrameStats::new(&stats, stats.speed)
+    }
+
+    /// `SetUnitBlocking(false)`: a unit overlapping an [`Unblocked`] one
+    /// is not pushed by it (the unblocked one still gives way), and the
+    /// unit blocks again once a slow update finds it on another square.
+    #[test]
+    fn an_unblocked_unit_pushes_nobody_and_reblocks_when_it_moves() {
+        let spot = Vec3::new(500.0, 0.0, 500.0);
+        let mut control = Harness::flat();
+        let a = control.spawn(UnitKind::Bit, 0, spot);
+        control.spawn(UnitKind::Bit, 0, spot + Vec3::X * 3.0);
+        for _ in 0..10 {
+            control.step();
+        }
+        assert!(control.pos(a).distance(spot) > 1.0, "overlap pushes");
+
+        let mut h = Harness::flat();
+        let a = h.spawn(UnitKind::Bit, 0, spot);
+        let b = h.spawn(UnitKind::Bit, 0, spot + Vec3::X * 3.0);
+        h.world.entity_mut(b).insert(Unblocked::at(spot));
+        for _ in 0..10 {
+            h.step();
+        }
+        assert!(h.pos(a).distance(spot) < 0.5, "a ignores the unblocked");
+        assert!(h.pos(b).distance(spot + Vec3::X * 3.0) > 1.0, "b gives way");
+        // It moved to another square: blocking again.
+        for _ in 0..SLOW_UPDATE_RATE {
+            h.step();
+        }
+        assert!(h.world.get::<Unblocked>(b).is_none());
     }
 
     fn mover_speed(h: &Harness, e: Entity) -> f32 {

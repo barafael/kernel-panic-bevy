@@ -253,7 +253,10 @@ impl Plugin for UnitsPlugin {
                             // (kamikaze, detector, …) this same tick.
                             bookkeeping::tag_unit_kinds,
                             worm::init_autohold,
-                            worm::promote_cloak_when_built,
+                            (
+                                worm::promote_cloak_when_built,
+                                worm::activate_pending_sensors,
+                            ),
                             cloak::update_cloak_detection,
                             spatial::rebuild_spatial_index,
                             combat::sync_deploy_state,

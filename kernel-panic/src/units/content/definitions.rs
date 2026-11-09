@@ -244,12 +244,20 @@ impl UnitKind {
     /// `assembler.bos:15`, `trojan.bos:22`, `gateway.bos:18`). The Byte's
     /// and Connection's `RadarDistance=200` never switches on: their
     /// scripts don't activate, and the units aren't on/off-able. (The
-    /// Worm's starts 5 s after it is built; not modelled.)
+    /// Worm's starts 5 s after it is built: see
+    /// [`UnitKind::activates_radar_after_build`].)
     pub fn activates_radar(self) -> bool {
         matches!(
             self,
             UnitKind::Assembler | UnitKind::Trojan | UnitKind::Gateway
         )
+    }
+
+    /// The Worm: its radar and seismic sense switch on only when
+    /// worm.bos `Create` reaches `set ACTIVATION to 1`, 5 s after the
+    /// build ([`crate::units::mechanics::worm::SensorsPending`]).
+    pub fn activates_radar_after_build(self) -> bool {
+        self == UnitKind::Worm
     }
 
     /// "Factory" per upstream `game_over.lua` (gamemode 1, the default):

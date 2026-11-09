@@ -127,12 +127,19 @@ use super::state::Fnv;
 /// one-frame sub-beams with a 50 % falloff at range, and a salvo waits for
 /// its last sub-beam; an east/west-facing building rotates its yardmap; a
 /// build order reserves no datavent (only a nanoframe or building does).
+/// 24 (2026-11-09, parity review, fourth pass): a Worm's radar and seismic
+/// sense start 152 frames after it is built (worm.bos `ACTIVATION`); the
+/// result of a Bug/Exploit morph is off the blocking map (`SetUnitBlocking
+/// (false)`: nothing collides with, avoids or paths round it; a Bug is
+/// blocking again once a slow update finds it on another square, an
+/// Exploit never is); a Worm holding fire (cloaked, AutoHold on) neither
+/// engages idle nor diverts a Fight.
 ///
 /// [`SimCommand::Dropped`]: crate::net::SimCommand::Dropped
 /// [`SimCommand::Returned`]: crate::net::SimCommand::Returned
 /// [`SimCommand::InternalSpeed`]: crate::net::SimCommand::InternalSpeed
 /// [`MatchRules`]: crate::net::MatchRules
-pub const SIM_VERSION: u32 = 23;
+pub const SIM_VERSION: u32 = 24;
 
 /// The map-independent half of [`Compat`]: what a peer announces when
 /// it joins a room, before any map is chosen.

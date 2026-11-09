@@ -70,24 +70,50 @@ surface, DOS/Gauss sub-beams with falloff, yardmap rotation by build
 facing, no datavent reservation by orders (the AI tracks its own
 constructors' sites), ghosted buildings and minimap radar blips.
 
+## Fourth pass (SIM_VERSION 24)
+
+- A Worm's radar and seismic sense start 152 frames after it is built
+  (`SensorsPending`, worm.bos `ACTIVATION`; `LosHandler.cpp:182` blocks
+  every sensor of a deactivated unit).
+- The Bug/Exploit morph's result is off the blocking map
+  (`Unblocked`, `SetUnitBlocking(nu, false)` in `LuaCOB.lua`): nothing
+  collides with, avoids or paths round it, an Exploit is never stamped on
+  the structure layer, a Bug blocks again once a slow update finds it on
+  another map square (`CMoveType::SlowUpdate`).
+- A Worm holding fire (cloaked, AutoHold on = `STANDINGFIREORDERS 0`)
+  neither engages while idle nor diverts a Fight. It is the only Fire
+  State the game ever sets, so the Fire State gap is closed.
+- Enter is a targeted command (`Mode::Enter`, `CMDTYPE.ICON_UNIT`): the
+  `E` button / hotkey arms it and the click on an own teleporter sends the
+  selected Packets in. Anything else is ignored and the mode stays armed.
+
+Checked and not gaps:
+
+- Repair on a nanoframe: Kernel Panic's constructors are `CanAssist=0`,
+  so a frame has a `soloBuilder` and `ExecuteRepair` refuses every other
+  builder (`canRepairUnit &= !unit->soloBuilder || unit->soloBuilder ==
+  owner`). Finishing the order is the engine's behaviour.
+- A Packet's Enter on an enemy teleporter is refused
+  (`network_enter.lua` `AllowCommand`; `apply.rs` drops it). A plain
+  right-click on one is the engine's default Attack, as here.
+
 ## Still open (observed in-parities)
 
-- The morph's result is a blocking unit (upstream `SetUnitBlocking(nu,
-  false)` lets units walk through a deployed Exploit); the morph shows no
-  flip/dissolve animation.
+- The morph shows no flip/dissolve animation.
 - Ghosted buildings are drawn as they are (not dimmed) and vanish when the
-  building dies unseen (the engine keeps the stale ghost).
-- A Worm's radar and seismic sense do not start 5 s after it is built.
-- Repair does not assist-build nanoframes; Guard/Repair on a nanoframe is
-  not special-cased.
+  building dies unseen (the engine keeps the stale ghost): needs a static
+  ghost entity and a dimmed material path.
+- A builder that was stopped cannot resume its own half-built nanoframe
+  with Repair (the `soloBuilder` case).
 - Unlit unit/terrain materials (no sun/ambient, Bevy tonemapping): a look
   decision, not changed.
 - KPAI flavour: the Fair budget runs at every difficulty (a design choice
   of the remake's slack ladder).
-- Minimap-drawn formations, Enter as a targeted `E`, Shift-queued gadget
-  commands, Packets on an enemy teleporter attack instead of being refused.
-- Fight diverts and idle engagement ignore a Fire State (no hold-fire
-  setting exists); the fight resume uses the leg's goal, not the engine's
+- Minimap-drawn formations; Shift-queued gadget commands (NX Flag,
+  SIGTERM, Dispatch, Firewall, Obelisk cast at once instead of waiting
+  their turn in the queue; Bombard queues).
+- A Packet's Enter does not check that the teleporter is unstunned
+  (`AllowCommand`); the fight resume uses the leg's goal, not the engine's
   re-pathed line.
 - The Signal's flight constants follow the engine source but were not
   compared with the original's flight time.

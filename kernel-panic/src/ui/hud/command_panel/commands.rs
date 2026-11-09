@@ -497,7 +497,7 @@ pub(crate) fn unit_commands(unit: &UnitCmdState, capped: &[UnitKind]) -> Vec<Cmd
         )),
         UnitKind::Packet => out.push(CmdDesc::new(
             CmdId::Enter,
-            Icon,
+            Targeted,
             "Enter",
             "Return this Packet to the Buffer",
             "e",
