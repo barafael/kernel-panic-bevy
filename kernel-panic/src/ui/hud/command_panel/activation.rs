@@ -213,6 +213,7 @@ pub(crate) fn active_command(modes: &OrderCursorModes, placement: &PlacementMode
         Mode::AttackMove => CmdId::Fight,
         Mode::Patrol => CmdId::Patrol,
         Mode::Guard => CmdId::Guard,
+        Mode::Enter => CmdId::Enter,
         Mode::Move => CmdId::Move,
         Mode::SetTarget => CmdId::SetTarget,
         Mode::Clear => CmdId::Clear,
@@ -296,6 +297,7 @@ pub(super) fn apply_activations(
             CmdId::Patrol => arm(Mode::Patrol),
             CmdId::Fight => arm(Mode::AttackMove),
             CmdId::Guard => arm(Mode::Guard),
+            CmdId::Enter => arm(Mode::Enter),
             CmdId::SetTarget => arm(Mode::SetTarget),
             CmdId::Clear => arm(Mode::Clear),
             // `CMDTYPE.ICON` upstream: the selected Bytes launch at once.
@@ -376,15 +378,6 @@ pub(super) fn apply_activations(
                         .map(|(e, ..)| e),
                 );
                 net.issue(SimCommand::Deploy { units });
-            }
-            CmdId::Enter => {
-                let units = net.units(
-                    units
-                        .iter()
-                        .filter(|(_, ut, ..)| ut.0 == UnitKind::Packet)
-                        .map(|(e, ..)| e),
-                );
-                net.issue(SimCommand::Enter { units });
             }
             CmdId::UnsetTarget => {
                 let units = net.units(units.iter().map(|(e, ..)| e));

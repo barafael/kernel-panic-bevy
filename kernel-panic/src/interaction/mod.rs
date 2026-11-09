@@ -236,6 +236,7 @@ pub(crate) fn unit_motion_systems() -> ScheduleConfigs<ScheduleSystem> {
             .after(structures::update_structure_layer)
             .before(movement_system),
         movement_system,
+        ground_move::reblock_moved_units.after(movement_system),
         // `smoothGround.UpdateSmoothMesh()` precedes the unit
         // updates in the engine's frame.
         crate::terrain::smooth_ground::update_smooth_ground.before(air_movement::hover_air_system),
@@ -243,6 +244,7 @@ pub(crate) fn unit_motion_systems() -> ScheduleConfigs<ScheduleSystem> {
         // `HandleObjectCollisions` for every ground unit reads
         // the positions all movers reached this frame.
         ground_collision_system
+            .after(ground_move::reblock_moved_units)
             .after(movement_system)
             .after(air_movement::hover_air_system),
         // Runs last so any Y drift introduced by the two

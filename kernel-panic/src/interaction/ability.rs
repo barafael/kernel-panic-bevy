@@ -52,6 +52,7 @@ impl Plugin for AbilityHotkeyPlugin {
                         trigger_clear_press_release,
                         trigger_attack_move_click,
                         trigger_guard_click,
+                        trigger_enter_click,
                         trigger_move_click,
                         trigger_set_target_click,
                     )
@@ -134,6 +135,9 @@ pub enum Mode {
     AttackMove,
     Patrol,
     Guard,
+    /// A Packet's Enter (`network_enter.lua`, `CMDTYPE.ICON_UNIT`): the
+    /// click names the teleporter it returns to.
+    Enter,
     Move,
     SetTarget,
     /// The constructors' Clear (`E` / button): a feature under the click,
@@ -151,6 +155,8 @@ impl Mode {
         match self {
             Mode::Patrol => CursorKind::Patrol,
             Mode::Guard => CursorKind::Defend,
+            // The command's `cursor="Load units"`.
+            Mode::Enter => CursorKind::Pickup,
             Mode::Move => CursorKind::Move,
             Mode::Clear => CursorKind::Reclamate,
             // The gadget commands' `cursor`: "Capture" for Bombard
@@ -971,6 +977,59 @@ fn trigger_guard_click(
         });
     }
     pending.markers.push((pos, OrderMarker::Guard));
+    modes.committed(&keys);
+    consume_click(&mut mouse);
+}
+
+/// Click handler: while [`Mode::Enter`] is armed, a left-click on a
+/// teleporter of the selected Packets' own team sends them in
+/// (`network_enter.lua`'s `AllowCommand`: any other target is refused,
+/// and the mode stays armed).
+#[allow(clippy::too_many_arguments)]
+fn trigger_enter_click(
+    mut mouse: ResMut<ButtonInput<MouseButton>>,
+    keys: Res<ButtonInput<KeyCode>>,
+    selected_q: Query<(Entity, &UnitType, &TeamId), With<Selected>>,
+    unit_root_q: Query<Entity, With<UnitType>>,
+    parent_q: Query<&ChildOf>,
+    unit_info_q: Query<(&TeamId, &UnitType)>,
+    target_gtf_q: Query<&GlobalTransform>,
+    windows: Query<&Window>,
+    camera_q: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
+    mut ray_cast: PickRayCast,
+    mut modes: ResMut<OrderCursorModes>,
+    mut pending: ResMut<PendingMoveIndicators>,
+    mut net: Issue,
+) {
+    if !modes.is(Mode::Enter) || !mouse.just_pressed(MouseButton::Left) {
+        return;
+    }
+    let Some(target) = unit_hit(&windows, &camera_q, &mut ray_cast, &unit_root_q, &parent_q) else {
+        return;
+    };
+    let Ok((t_team, t_kind)) = unit_info_q.get(target) else {
+        return;
+    };
+    let packets: Vec<Entity> = selected_q
+        .iter()
+        .filter(|(_, unit, team)| unit.0 == UnitKind::Packet && team.0 == t_team.0)
+        .map(|(e, ..)| e)
+        .collect();
+    if !t_kind.0.is_teleporter() || packets.is_empty() {
+        return;
+    }
+    let pos = target_gtf_q
+        .get(target)
+        .map_or(Vec3::ZERO, |t| t.translation());
+    let units = net.units(packets);
+    if let Some(target) = net.id(target) {
+        net.issue(SimCommand::Order {
+            units,
+            order: Order::Enter(target),
+            queue: shift_held(&keys),
+        });
+    }
+    pending.markers.push((pos, OrderMarker::Enter));
     modes.committed(&keys);
     consume_click(&mut mouse);
 }

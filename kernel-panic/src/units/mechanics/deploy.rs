@@ -332,10 +332,15 @@ pub fn process_deploy(
             &mut ctx,
         );
         let mut ec = ctx.commands.entity(spawned);
-        ec.insert(Health {
-            current: new_current,
-            max: new_max,
-        });
+        // `Spring.SetUnitBlocking(nu, false)` in `LuaCOB.lua`'s replace
+        // queue: units walk through the morph's result.
+        ec.insert((
+            Health {
+                current: new_current,
+                max: new_max,
+            },
+            crate::interaction::ground_move::Unblocked::at(transform.translation),
+        ));
         if selected {
             ec.insert(Selected);
         }

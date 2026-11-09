@@ -104,12 +104,23 @@ pub fn tag_unit_kinds(
             });
         }
         let radar = unit_registry.radar_distance(kind);
-        if radar > 0.0 && kind.activates_radar() {
-            entity.insert(Detector { radius: radar });
-        }
         let seismic = unit_registry.seismic_distance(kind);
-        if seismic > 0.0 {
-            entity.insert(SeismicDetector { radius: seismic });
+        if kind.activates_radar_after_build() {
+            // worm.bos `Create`: `set ACTIVATION to 1` after the build
+            // and `sleep 5000`; radar and seismic are off until then
+            // (`LosHandler.cpp:182`, `noSensors`).
+            entity.insert(crate::units::mechanics::worm::SensorsPending {
+                delay: crate::units::mechanics::worm::WORM_ACTIVATION_DELAY,
+                radar,
+                seismic,
+            });
+        } else {
+            if radar > 0.0 && kind.activates_radar() {
+                entity.insert(Detector { radius: radar });
+            }
+            if seismic > 0.0 {
+                entity.insert(SeismicDetector { radius: seismic });
+            }
         }
         // Same resolution `combat_system` applies: `unit_registry.weapon`
         // already applies `CanAttack` and drops the build lasers; a name
