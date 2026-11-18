@@ -217,6 +217,23 @@ pub const fn frames_to_secs(frames: f32) -> f32 {
     frames / GAME_SPEED
 }
 
+/// Sim frames a COB `sleep ms` lasts: the script clock moves 33 ms a
+/// frame (`1000 / GAME_SPEED`) and a thread wakes once the clock is
+/// *past* its wake time (`CobEngine.cpp`), so `sleep 100` is 4 frames
+/// and `sleep 5000` is 152 — not `ms · 30 / 1000`.
+pub const fn cob_sleep_frames(ms: u32) -> u32 {
+    ms / 33 + 1
+}
+
+/// The start value, in seconds, of a countdown that is stepped by one
+/// frame's `dt` a tick and has to run out on its `frames`-th step: half
+/// a frame under `frames`, so the float rounding of the steps cannot
+/// move the tick it crosses zero on (`n / 30` counted down in `1 / 30`
+/// steps ends on step `n` or `n + 1`, depending on `n`).
+pub const fn countdown_secs(frames: u32) -> f32 {
+    (frames as f32 - 0.5) / GAME_SPEED
+}
+
 /// Number of sim frames (fractional) in `secs` seconds.
 pub const fn secs_to_frames(secs: f32) -> f32 {
     secs * GAME_SPEED

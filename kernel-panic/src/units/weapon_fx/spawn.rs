@@ -68,11 +68,19 @@ pub(super) fn spawn_weapon_visuals(
     gravity: Option<Res<crate::sim::MapGravity>>,
     mut rng: ResMut<SimRng<WeaponVisualRng>>,
     heightmap: Option<Res<Heightmap>>,
+    sight: crate::units::mechanics::cloak::LocalSight,
 ) {
     // The one read of the map's gravity for every shell spawned here.
     let map_gravity = gravity.as_deref().copied().unwrap_or_default().0;
     // gateway.bos `lua_BuildArc`: the builder's white strand.
+    // `network_arceffect.lua`'s `DrawWorld` draws an arc only when one of
+    // its ends is in the player's line of sight (or it is spectating):
+    // an enemy Gateway building, or a Connection firing, in the fog
+    // shows nothing.
     for arc in pending.build_arcs.drain(..) {
+        if !sight.sees(arc.from) && !sight.sees(arc.to) {
+            continue;
+        }
         spawn_lightning_arc(
             arc.from,
             arc.to,
@@ -117,6 +125,10 @@ pub(super) fn spawn_weapon_visuals(
         let is_gauss_arc = weapon_registry.is_gauss_cannon(event.weapon);
 
         if is_gauss_arc {
+            let from = event.arc_from.unwrap_or(event.attacker_pos);
+            if !sight.sees(from) && !sight.sees(event.target_pos) {
+                continue;
+            }
             let tint = LinearRgba::rgb(
                 0.2 + 0.1 * next_f32(&mut rng),
                 0.9,
@@ -1245,7 +1257,10 @@ impl ArcStyle {
 /// One `network_arceffect.lua` lightning strand (`drawArc`): the
 /// straight `start`→`end` line, a 160-elmo arch at the midpoint
 /// (`+160 * (1 − (2t−1)²)`), and `style.jitter` of spray shrinking
-/// toward both ends.
+/// toward both ends. The gadget's `for i=0,1.1,.1` adds `.1` up to
+/// 1.0999…, so its strip has a twelfth vertex a tenth past `end`, where
+/// the parabola has turned: the strand overshoots the target and dips
+/// some 70 elmos under it.
 #[allow(clippy::too_many_arguments)]
 fn spawn_lightning_arc(
     start: Vec3,
@@ -1264,7 +1279,7 @@ fn spawn_lightning_arc(
 
     let mut points = Vec::with_capacity(ARC_SEGMENTS + 1);
     for i in 0..=ARC_SEGMENTS {
-        let t = i as f32 / ARC_SEGMENTS as f32;
+        let t = i as f32 * 0.1;
         let arch = 1.0 - sq(2.0 * t - 1.0);
         // Same parabola for the jitter envelope — the gadget shakes
         // the strand most at mid-arc and pins both ends.
@@ -1288,11 +1303,12 @@ fn spawn_lightning_arc(
     });
 }
 
-/// Arc geometry constants — see [`spawn_lightning_arc`]. Segment count
-/// 16 matches the upstream gadget's strip resolution.
-const ARC_SEGMENTS: usize = 16;
-/// Ribbon half-width in elmos (upstream GL line width 4).
-const ARC_WIDTH: f32 = 3.0;
+/// Arc geometry constants — see [`spawn_lightning_arc`]: the gadget's
+/// strip has 12 vertices, `i` = 0, .1, …, 1.1.
+const ARC_SEGMENTS: usize = 11;
+/// Ribbon half-width in elmos: `drawArc`'s `width` (4) is the offset of
+/// each edge from the centre line.
+const ARC_WIDTH: f32 = 4.0;
 /// How long the bolt stays visible. Upstream redraws for exactly one
 /// sim frame; with the port's 4 s reload a single frame would be a
 /// subliminal flicker, so hold it a touch longer.
@@ -1499,10 +1515,47 @@ mod tests {
         assert_eq!(arc.width, 2.0);
         assert_eq!(arc.tint, LinearRgba::WHITE);
         assert!((arc.max_lifetime - 16.0 / 30.0).abs() < 1e-4);
-        assert_eq!((arc.points[0], arc.points[ARC_SEGMENTS]), (from, to));
+        // Twelve vertices, `i` = 0 … 1.1: the tenth is the target, the
+        // last a tenth beyond it and below the line.
+        assert_eq!(arc.points.len(), 12);
+        assert_eq!(arc.points[0], from);
+        assert!(arc.points[10].distance(to) < 1e-3);
+        assert!(arc.points[11].y < to.y - 60.0);
         let mid = arc.points[ARC_SEGMENTS / 2];
         assert!((mid.y - (10.0 + ARC_ARCH_HEIGHT)).abs() <= 5.0 * 2.0_f32.sqrt());
         assert!(world.resource::<PendingAttacks>().build_arcs.is_empty());
+    }
+
+    /// `network_arceffect.lua` draws an arc only with one end in the
+    /// player's line of sight: in the fog, with nothing of the player's
+    /// near, it is not drawn.
+    #[test]
+    fn an_arc_in_the_fog_is_not_drawn() {
+        use crate::units::weapon_fx::BuildArcEvent;
+        let mut app = fx_app();
+        app.insert_resource(WeaponRegistry::default())
+            .insert_resource(crate::units::mechanics::cloak::FogEnabled(true))
+            .insert_resource(crate::units::player::LocalTeam(0))
+            .init_resource::<crate::units::teams::Alliances>()
+            .insert_resource(crate::units::content::unit_registry::UnitRegistry::empty());
+        app.world_mut()
+            .resource_mut::<PendingAttacks>()
+            .build_arcs
+            .push(BuildArcEvent {
+                from: Vec3::ZERO,
+                to: Vec3::X * 80.0,
+            });
+        app.world_mut()
+            .run_system_once(spawn_weapon_visuals)
+            .unwrap();
+        let world = app.world_mut();
+        assert_eq!(
+            world
+                .query_filtered::<(), With<LightningArc>>()
+                .iter(world)
+                .count(),
+            0
+        );
     }
 
     /// Ordinary beam weapons keep their regular visuals — the arc path

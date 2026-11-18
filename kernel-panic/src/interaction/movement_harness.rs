@@ -573,6 +573,7 @@ fn fight_leg_holds_only_when_engaged() {
     h.world.entity_mut(e).insert(TargetCache {
         target: Some(enemy),
         rescan_frame: u64::MAX,
+        no_chase: false,
     });
     for _ in 0..60 {
         h.step();
@@ -584,5 +585,19 @@ fn fight_leg_holds_only_when_engaged() {
     assert!(
         h.pos(e).distance(held_at) < 1.0,
         "an engaged fight leg holds"
+    );
+
+    // A `NoChaseCategory` target (a Flow overhead) is shot on the march.
+    h.world.entity_mut(e).insert(TargetCache {
+        target: Some(enemy),
+        rescan_frame: u64::MAX,
+        no_chase: true,
+    });
+    for _ in 0..60 {
+        h.step();
+    }
+    assert!(
+        h.pos(e).distance(held_at) > 50.0,
+        "a no-chase target must not halt the fight"
     );
 }

@@ -9,7 +9,10 @@
 //! chases it, but never further than the range plus 500 from where it
 //! stood, and for no longer than 5 s per order (`:886-901`;
 //! `MoveType.cpp:76`). The Pointer holds its ground (`pointer.bos:158`
-//! sets `STANDINGFIREORDERS` to hold position).
+//! sets `STANDINGFIREORDERS` to hold position). An enemy in the unit's
+//! `NoChaseCategory` (a Flow, for nearly every ground unit) is never
+//! gone after (`CMobileCAI::IsValidTarget`, `:583`): not by an idle
+//! unit, not by a Fight, not by a guard.
 //!
 //! `combat_system` already fires at whatever is inside the range, so this
 //! only supplies the approach: [`idle_engage_system`] gives the order,
@@ -87,7 +90,7 @@ fn holds_position(kind: UnitKind) -> bool {
 /// a Fight.
 mod holds_fire {
     use crate::units::mechanics::cloak::Cloaked;
-    use crate::units::mechanics::worm::AutoHold;
+    use crate::units::mechanics::worm::{AutoHold, Surfaced};
     use bevy::ecs::query::QueryData;
     use bevy::prelude::*;
 
@@ -95,11 +98,15 @@ mod holds_fire {
     pub struct HoldFire {
         autohold: Option<&'static AutoHold>,
         cloaked: Has<Cloaked>,
+        surfaced: Has<Surfaced>,
     }
 
     impl HoldFireItem<'_, '_> {
+        /// worm.bos: AutoHold on and cloaked — but `AimWeapon1` sets
+        /// fire at will at once, while the cloak lasts to the slow
+        /// update.
         pub fn holds(&self) -> bool {
-            self.cloaked && self.autohold.is_some_and(|a| a.0)
+            self.cloaked && !self.surfaced && self.autohold.is_some_and(|a| a.0)
         }
     }
 }
@@ -167,6 +174,10 @@ pub fn idle_engage_system(
                 || !candidate.targetable_by(team.0)
                 || candidate.radar_only_for(team.0)
                 || !unit_registry.auto_target_allowed(unit.0, candidate.kind)
+                // `IsValidTarget`: `NoChaseCategory` (a Bit never leaves
+                // its post for a Flow; its weapon still shoots one in
+                // range).
+                || unit_registry.no_chase(unit.0, candidate.kind)
             {
                 return;
             }
@@ -235,7 +246,14 @@ pub struct FightGoal(pub Vec3);
 
 /// A unit on a fight leg (attack-move, patrol) that has no enemy in
 /// range but sees one within range + 100 leaves its line to attack the
-/// nearest, on its own slow update.
+/// nearest, on its own slow update. An enemy already in range halts the
+/// leg through the weapon's own target ([`fight_engaged`]) — unless
+/// that target is a `NoChaseCategory` one the leg does not stop for:
+/// then the nearest enemy it may go after is attacked by order, in
+/// range or not (`ExecuteFight` attacks the closest *valid* target,
+/// whatever the weapon is shooting at meanwhile).
+///
+/// [`fight_engaged`]: crate::interaction::movement::fight_engaged
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub fn fight_divert_system(
     tick: Res<SimTick>,
@@ -249,6 +267,7 @@ pub fn fight_divert_system(
             &NetId,
             &MoveTarget,
             holds_fire::HoldFire,
+            Option<&super::TargetCache>,
         ),
         (
             With<crate::interaction::movement::AttackMoveActive>,
@@ -269,10 +288,12 @@ pub fn fight_divert_system(
 ) {
     let frame = tick.frame();
     let map_gravity = gravity.as_deref().copied().unwrap_or_default().0;
-    for (entity, unit, stats, team, tf, net, goal, hold) in &units {
+    for (entity, unit, stats, team, tf, net, goal, hold, cache) in &units {
         if !slow_update_due(frame, net.0) || stats.speed <= 0.0 || hold.holds() {
             continue;
         }
+        // The weapon is busy with a target the leg marches on under.
+        let weapon_on_no_chase = cache.is_some_and(|c| c.target.is_some() && c.no_chase);
         let Some(weapon) = unit_registry
             .weapon(unit.0)
             .and_then(|kind| weapon_registry.get(kind))
@@ -292,10 +313,16 @@ pub fn fight_divert_system(
                 || !candidate.targetable_by(team.0)
                 || candidate.radar_only_for(team.0)
                 || !unit_registry.auto_target_allowed(unit.0, candidate.kind)
+                // `GetClosestValidTarget` → `IsValidTarget`: a
+                // `NoChaseCategory` enemy neither halts nor diverts the
+                // fight (the march goes on under a Flow, shooting).
+                || unit_registry.no_chase(unit.0, candidate.kind)
             {
                 return;
             }
-            if aim::in_weapon_range(weapon, aim_from, candidate.mid_pos(), false, map_gravity) {
+            if !weapon_on_no_chase
+                && aim::in_weapon_range(weapon, aim_from, candidate.mid_pos(), false, map_gravity)
+            {
                 // The weapon has it: the fight halts and shoots.
                 in_reach = true;
                 return;
@@ -452,6 +479,71 @@ mod tests {
                 rig.world.get::<AttackTargetOrder>(unit).is_some(),
                 engages,
                 "autohold {autohold}, cloaked {cloaked}"
+            );
+        }
+    }
+
+    /// `NoChaseCategory=VTOL` (bit.fbi): an idle Bit does not go after a
+    /// Flow just beyond its reach, and a fighting one does not turn aside
+    /// for it; the same Flow draws a DoS, whose `NoChaseCategory` is
+    /// `FACTORY`.
+    #[test]
+    fn no_chase_category_enemies_are_not_gone_after() {
+        use crate::interaction::movement::AttackMoveActive;
+        for (kind, chases) in [(UnitKind::Bit, false), (UnitKind::Dos, true)] {
+            let (mut rig, unit, _) = rig(kind, 100_000.0);
+            let flow = rig.world.spawn_empty().id();
+            let mut spatial = SpatialIndex::default();
+            spatial.insert_for_test(SpatialEntry {
+                kind: UnitKind::Flow,
+                is_flying: true,
+                ..entry(flow, rig.reach + 60.0)
+            });
+            rig.world.insert_resource(spatial);
+            rig.world.run_system_once(idle_engage_system).unwrap();
+            assert_eq!(
+                rig.world.get::<AttackTargetOrder>(unit).is_some(),
+                chases,
+                "idle {kind:?}"
+            );
+            rig.world
+                .entity_mut(unit)
+                .remove::<(AttackTargetOrder, Engaged)>()
+                .insert((MoveTarget(Vec3::new(5000.0, 0.0, 0.0)), AttackMoveActive));
+            rig.world.run_system_once(fight_divert_system).unwrap();
+            assert_eq!(
+                rig.world.get::<FightGoal>(unit).is_some(),
+                chases,
+                "fighting {kind:?}"
+            );
+        }
+    }
+
+    /// A fight leg whose weapon is shooting a `NoChaseCategory` target
+    /// does not halt for it, so an enemy it may go after is attacked by
+    /// order even inside the weapon's range. With the weapon on that
+    /// enemy itself the leg halts and nothing is ordered.
+    #[test]
+    fn a_fight_under_a_flow_attacks_the_enemy_in_range() {
+        use crate::interaction::movement::AttackMoveActive;
+        use crate::units::combat::TargetCache;
+        for (on_flow, diverts) in [(false, false), (true, true)] {
+            let (mut rig, unit, enemy) = rig(UnitKind::Bit, 50.0);
+            let flow = rig.world.spawn_empty().id();
+            rig.world.entity_mut(unit).insert((
+                MoveTarget(Vec3::new(5000.0, 0.0, 0.0)),
+                AttackMoveActive,
+                TargetCache {
+                    target: Some(if on_flow { flow } else { enemy }),
+                    rescan_frame: u64::MAX,
+                    no_chase: on_flow,
+                },
+            ));
+            rig.world.run_system_once(fight_divert_system).unwrap();
+            assert_eq!(
+                rig.world.get::<AttackTargetOrder>(unit).map(|o| o.target),
+                diverts.then_some(enemy),
+                "weapon on a Flow: {on_flow}"
             );
         }
     }

@@ -126,7 +126,49 @@ Checked and not gaps:
   line (`commandPos1/2`, roaming limit) differs, which has no effect on
   the movement.
 
+## Sixth pass (SIM_VERSION 28)
+
+- `NoChaseCategory`: no idle engagement, Fight detour or guard
+  retaliation against such an enemy; a Fight marches on under one. Guards
+  retaliate only against what they could attack (armed, category, seen).
+  An allied hit is not a `LastAttacker`.
+- Factory queue as `CFactoryCAI` edits it: cancelling the front order
+  stops the build and removes the unit on the pad; Alt+click under Repeat
+  queues one-shot orders; the bugger-off check every 8th frame.
+- Enter and Dispatch run when the order arrives, then on slow updates;
+  Enter range on the ground plane. Packets, Viruses, mines and the Signal
+  respect the unit limit. A Virus faces away from its host's heading.
+- COB sleeps last whole frames (ARMORED grace, Hole fade, Kernel
+  staging); Carrier keeps its build stance; Kernel/Socket skip the closed
+  yard wait; the area-denial zone deals its last tick.
+- Cloak changes wait for the slow update (`SlowUpdateCloak`): a Worm
+  surfaces and burrows up to 14 frames late (burrow 101 frames after the
+  last aim); an aiming Worm fires at will at once.
+- NX leaves an attack-ground order on its spot (`specialattack.lua`'s
+  `CMD.INSERT ... CMD.ATTACK`) and waits out the reload instead of being
+  dropped; a Firewall cast during the recharge waits for it
+  (`return true, false`). SIGTERM and mines are still dropped, as upstream.
+- A deploy order (hotkey or Bombard) clears the unit's orders.
+- A mine bolt whose Byte died leaves no mine; mine bolts with a live Byte
+  and NX/Infection shells of a dead firer show no impact CEG (`noGfx`).
+- Lightning arcs are drawn only with an end in the player's sight, with
+  the gadget's 12-vertex strip (overshoot and dip) and half-width 4.
+
 ## Still open (observed in-parities)
+
+- `taken_the_lead.lua`: no kill attribution, no "has taken the lead with
+  N kills!" announcement.
+- Firewall protection overlay (`network_reflectorshield.lua` DrawWorld:
+  green additive scrolling `shieldEffect.png` on protected units).
+- Network build overlay (`network_build.lua`: `network_buildeffect.tga`
+  sweep on Gateway/Carrier buildees).
+- Firewall recharge/protection and Terminal recharge end on the gadgets'
+  16-frame grid (`(f+3)%16`), 0-15 frames later than the port's timers.
+- worm.bos sets hold fire from a `sleep 300` poll of `CLOAKED`: up to 10
+  frames of fire-at-will after the cloak comes on.
+- Deliberate: Mine Launch needs 6100 HP (upstream 6000) and is refused at
+  the Logic Bomb cap (upstream pays and reloads for nothing).
+- Single-player autosave (`spawn_units.lua`) is not ported.
 
 - The morph's alpha dissolve is not drawn.
 - Unlit unit/terrain materials (no sun/ambient, Bevy tonemapping): a look

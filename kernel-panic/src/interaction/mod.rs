@@ -55,6 +55,7 @@ type ActiveOrder = (
         crate::units::lifecycle::construction::RepairOrder,
         crate::units::lifecycle::construction::Repairing,
         crate::units::mechanics::command_fire::InfectionCast,
+        crate::units::mechanics::command_fire::FirewallWait,
     ),
 );
 
@@ -153,7 +154,9 @@ pub(crate) fn install_command(ec: &mut EntityCommands, cmd: movement::QueuedComm
             ec.insert(crate::units::lifecycle::construction::RepairOrder { target });
         }
         QueuedCommand::Enter { target, .. } => {
-            ec.insert(crate::units::mechanics::network_buffer::EnterOrder { target });
+            ec.insert(crate::units::mechanics::network_buffer::EnterOrder::new(
+                target,
+            ));
         }
         // Cast on the next tick (`run_queued_casts`).
         QueuedCommand::Cast { pos, auto } => {

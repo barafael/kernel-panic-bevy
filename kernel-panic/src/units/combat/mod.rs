@@ -304,6 +304,13 @@ pub struct TargetCache {
     pub target: Option<Entity>,
     /// Sim frame from which the next scan runs.
     pub rescan_frame: u64,
+    /// The target is in the unit's `NoChaseCategory`
+    /// ([`UnitRegistry::no_chase`]): the weapon shoots it, but the
+    /// command AI does not act on it — a Fight marches on under a Flow
+    /// instead of halting for it ([`fight_engaged`]).
+    ///
+    /// [`fight_engaged`]: crate::interaction::movement::fight_engaged
+    pub no_chase: bool,
 }
 
 /// Auto-target pick order: `CGameHelper::GenerateWeaponTargets`' priority,
@@ -320,6 +327,8 @@ pub(crate) struct TargetRank {
     priority: f32,
     /// A `BadTargetCategory1` pick: rescanned at the next slow update.
     bad: bool,
+    /// A `NoChaseCategory` pick ([`TargetCache::no_chase`]).
+    no_chase: bool,
     dist_sq: f32,
 }
 
@@ -979,6 +988,7 @@ pub fn combat_system(
                 Has<DebugBlasted>,
                 &NetId,
                 Option<&engage::LastAttacker>,
+                Has<super::mechanics::worm::Surfaced>,
             ),
         ),
         (
@@ -1039,7 +1049,7 @@ pub fn combat_system(
         worm_splash,
         mut aim_slot,
         mut cache_slot,
-        (nx_cast, debug_blasted, net_id, last_hit),
+        (nx_cast, debug_blasted, net_id, last_hit, surfaced),
     ) in attackers.iter_mut().sort::<&NetId>()
     {
         // pointer.bos `AimWeapon1`: `if (aimingSpecial) return 0` — a
@@ -1055,8 +1065,10 @@ pub fn combat_system(
             continue;
         }
         // worm.bos `STANDINGFIREORDERS=0` while cloaked with AutoHold on:
-        // hold fire — only the player's explicit targets engage.
-        let hold_fire = cloaked && autohold.is_some_and(|a| a.0);
+        // hold fire — only the player's explicit targets engage. A Worm
+        // already surfacing (`AimWeapon1` sets fire at will) whose cloak
+        // waits for the slow update fires at will.
+        let hold_fire = cloaked && !surfaced && autohold.is_some_and(|a| a.0);
         // Scans come from `CWeapon::SlowUpdate`: the unit's first one
         // from `earliest` on. Units stagger by id there, so attackers
         // whose shared target died don't all rescan on one frame ever
@@ -1167,6 +1179,7 @@ pub fn combat_system(
         let rank_of = |dist_sq: f32| TargetRank {
             priority: 0.0,
             bad: false,
+            no_chase: false,
             dist_sq,
         };
         // `lastAttacker`, as the vendored engine reads it: the unit that
@@ -1349,6 +1362,7 @@ pub fn combat_system(
                 let rank = TargetRank {
                     priority,
                     bad,
+                    no_chase: unit_registry.no_chase(unit_type.0, candidate.kind),
                     dist_sq,
                 };
                 if defer_lof {
@@ -1395,6 +1409,7 @@ pub fn combat_system(
                 let cache = TargetCache {
                     target: None,
                     rescan_frame: rescan_at(frame + 1),
+                    no_chase: false,
                 };
                 put(&mut commands, entity, &mut cache_slot, cache);
             } else if scan_due {
@@ -1414,6 +1429,7 @@ pub fn combat_system(
                 let cache = TargetCache {
                     target: Some(target_entity),
                     rescan_frame: rescan_at(frame + wait),
+                    no_chase: rank.no_chase,
                 };
                 put(&mut commands, entity, &mut cache_slot, cache);
             }
@@ -1423,6 +1439,7 @@ pub fn combat_system(
                 let cache = TargetCache {
                     target: Some(target_entity),
                     rescan_frame: frame,
+                    no_chase: false,
                 };
                 put(&mut commands, entity, &mut cache_slot, cache);
             }

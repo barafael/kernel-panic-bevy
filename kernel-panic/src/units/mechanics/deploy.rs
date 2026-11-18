@@ -126,20 +126,29 @@ pub fn tick_morph_gates(
 }
 
 /// A deploy order starts the unit's script, unless it already runs
-/// (`if (deployed) return 0; //mutex`).
+/// (`if (deployed) return 0; //mutex`). Either way it is a plain,
+/// unqueued `CMD_DEPLOY` — the hotkey's and the one `bug_bombard.lua`
+/// gives (`GiveOrderToUnit(u, CMD_DEPLOY, {}, {})`) — so the unit's
+/// orders and queue go (`CCommandAI::GiveAllowedCommand`): a Bug stops
+/// where it is while its script waits for `morphable`, and the morph's
+/// result inherits only what is ordered from then on (Bombard's attack).
 pub fn start_morph(
     mut events: MessageReader<DeployEvent>,
-    units: Query<&UnitType, (Without<Dying>, Without<Morphing>)>,
+    units: Query<(&UnitType, Has<Morphing>), Without<Dying>>,
     mut commands: Commands,
 ) {
     for event in events.read() {
-        let Ok(unit) = units.get(event.entity) else {
+        let Ok((unit, morphing)) = units.get(event.entity) else {
             continue;
         };
         if unit.0.deploy_pair().is_none() {
             continue;
         }
         let mut ec = commands.entity(event.entity);
+        crate::interaction::clear_orders(&mut ec);
+        if morphing {
+            continue;
+        }
         ec.insert(Morphing {
             then: event.then,
             started: false,
@@ -328,11 +337,11 @@ pub fn process_deploy(
         // `UnitDestroyed` runs for the swapped-out unit too: an infected
         // Bug or Exploit releases its Virus (infection.lua).
         if let Some(infected) = infected {
-            virus_spawns.push(crate::units::combat::VirusSpawn {
-                position: transform.translation,
-                faction: infected.attacker_faction,
-                team: infected.attacker_team,
-            });
+            virus_spawns.push(crate::units::combat::VirusSpawn::of(
+                infected,
+                transform.translation,
+                transform.forward().as_vec3(),
+            ));
         }
 
         let facing = transform.forward().xz();
@@ -372,6 +381,33 @@ pub fn process_deploy(
 mod tests {
     use super::*;
     use bevy::ecs::system::RunSystemOnce;
+
+    /// A deploy order is a plain `CMD_DEPLOY`: the Bug's walk and queue
+    /// go at once, even while the script waits for `morphable`, so the
+    /// Exploit inherits nothing queued before it.
+    #[test]
+    fn a_deploy_order_clears_the_queue() {
+        use crate::interaction::movement::{CommandQueue, MoveTarget, QueuedCommand};
+        let mut world = World::new();
+        world.init_resource::<Messages<DeployEvent>>();
+        let bug = world
+            .spawn((
+                UnitType(crate::units::content::definitions::UnitKind::Bug),
+                MoveTarget(Vec3::X * 500.0),
+                CommandQueue {
+                    commands: [QueuedCommand::Move(Vec3::Z * 500.0)].into(),
+                },
+            ))
+            .id();
+        world.write_message(DeployEvent {
+            entity: bug,
+            then: None,
+        });
+        world.run_system_once(start_morph).unwrap();
+        assert!(world.get::<Morphing>(bug).is_some());
+        assert!(world.get::<MoveTarget>(bug).is_none());
+        assert!(world.get::<CommandQueue>(bug).is_none());
+    }
 
     /// `bug_bombard.lua`: out of range the Bug walks at its target; within
     /// 1150 it stops, drops the order and asks to deploy with the attack

@@ -96,6 +96,12 @@ fn manual_target_gate(attacker: &UnitDef, categories: &str) -> bool {
     only.is_empty() || categories_intersect(only, categories)
 }
 
+/// [`UnitRegistry::no_chase`] for one attacker FBI against a candidate's
+/// `Category` list: `NoChaseCategory`.
+fn no_chase_gate(attacker: &UnitDef, categories: &str) -> bool {
+    categories_intersect(&attacker.no_chase_category, categories)
+}
+
 /// `UnitDef::maxAcc` (elmos/frame²) with Spring's 0.5 default — see
 /// [`UnitRegistry::acc_rate`].
 fn max_acc(d: Option<&UnitDef>) -> f32 {
@@ -166,6 +172,8 @@ pub struct UnitRegistry {
     bad_target: Box<[bool]>,
     /// [`Self::can_attack`], row-major `[attacker][candidate]`.
     manual_target: Box<[bool]>,
+    /// [`Self::no_chase`], row-major `[attacker][candidate]`.
+    no_chase: Box<[bool]>,
     /// See [`Self::hexfarm_medians`] — over *every* loaded FBI, not just
     /// the ones bound to a `UnitKind`.
     hexfarm_medians: (f64, f64),
@@ -257,6 +265,7 @@ impl UnitRegistry {
         Self {
             bad_target: pairs(bad_target_gate, false),
             manual_target: pairs(manual_target_gate, true),
+            no_chase: pairs(no_chase_gate, false),
             model_radii: vec![0.0; defs.len()].into(),
             defs,
             kinds,
@@ -398,6 +407,17 @@ impl UnitRegistry {
     /// the OnlyTarget half only.
     pub fn can_attack(&self, attacker: UnitKind, candidate: UnitKind) -> bool {
         self.manual_target[Self::pair(attacker, candidate)]
+    }
+
+    /// Upstream FBI `NoChaseCategory`: the command AI never goes *after*
+    /// such a candidate by itself. Its one use in the sim is
+    /// `CMobileCAI::IsValidTarget` (`MobileCAI.cpp:583`), which gates the
+    /// idle attack order (`GenerateAttackCmd`), a Fight's detour and a
+    /// guard's retaliation — never the weapon's own target choice, so a
+    /// Bit (`NoChaseCategory=VTOL`) still shoots a Flow inside its range
+    /// but does not leave its post for one.
+    pub fn no_chase(&self, attacker: UnitKind, candidate: UnitKind) -> bool {
+        self.no_chase[Self::pair(attacker, candidate)]
     }
 
     /// Max traversable slope in **Spring's encoding**: `1 - cos(deg ×

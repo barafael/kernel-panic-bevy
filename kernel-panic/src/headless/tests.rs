@@ -1331,9 +1331,9 @@ fn bug_bombards_by_walking_in_and_deploying() {
 }
 
 /// End to end: KP's Dispatch (`network_dispatch.lua`). A teleporter's
-/// order runs on its slow update: one pass over the 12 spots, a spot a
-/// unit stands on skipped without spending a Packet; with Alt a pass on
-/// every slow update (15 frames) until the buffer is empty.
+/// order runs when it arrives: one pass over the 12 spots, a spot a
+/// unit stands on skipped without spending a Packet; with Alt another
+/// pass on every slow update (15 frames) until the buffer is empty.
 #[test]
 fn dispatch_passes_run_on_the_slow_update() {
     use crate::net::{CommandFrame, NetId, NetPos, SimCommand, Units};
@@ -1403,7 +1403,8 @@ fn dispatch_passes_run_on_the_slow_update() {
         });
     };
 
-    // One pass: the 11 free spots, within a slow update of the order.
+    // One pass: the 11 free spots, as soon as the order arrives
+    // (`CCommandAI::GiveAllowedCommand` runs it at once).
     h.world_mut().resource_mut::<PacketBuffer>().add(0, 30);
     dispatch(&mut h, false);
     let mut frames = 0;
@@ -1411,10 +1412,7 @@ fn dispatch_passes_run_on_the_slow_update() {
         h.step();
         frames += 1;
     }
-    assert!(
-        frames <= 16,
-        "the pass waits for the slow update ({frames} frames)"
-    );
+    assert!(frames <= 3, "the first pass runs at once ({frames} frames)");
     assert_eq!(buffer(&mut h), 19, "11 spots free, the Bit's taken");
     assert_eq!(packets(&mut h), 11);
     assert!(h.world_mut().get::<DispatchOrder>(connection).is_none());
@@ -1441,8 +1439,12 @@ fn dispatch_passes_run_on_the_slow_update() {
     }
     assert_eq!(last, 0, "drained");
     assert!(drops.len() >= 4, "40 Packets take passes: {drops:?}");
+    // The first pass runs with the order; the rest on the slow updates
+    // (not necessarily the very next one: the first Packets may still
+    // stand on their spots then, and a taken spot is skipped).
+    assert!(drops[0] <= 2, "the first pass runs at once: {drops:?}");
     assert!(
-        drops.windows(2).all(|w| (w[1] - w[0]) % 15 == 0),
+        drops[1..].windows(2).all(|w| (w[1] - w[0]) % 15 == 0),
         "on the teleporter's slow updates: {drops:?}"
     );
     assert!(h.world_mut().get::<DispatchOrder>(connection).is_none());

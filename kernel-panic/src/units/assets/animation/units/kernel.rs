@@ -14,8 +14,9 @@
 //!   out to 30°/35° and lift to 0, then pick up the head lift and the
 //!   outward turns once the pillar settles.
 //! - `Deactivate()` (the host waits 7 s after the last build step, as
-//!   `CFactory::Update` does) — the `YARD_OPEN` loop holds 300 ms, then
-//!   the pillars fold back down one per **1800 ms** (`GetPillarNRest`): a
+//!   `CFactory::Update` does) — the `YARD_OPEN` loop never runs (the
+//!   engine has closed the yard before it calls the script), so the
+//!   pillars fold back down at once, one per **1800 ms** (`GetPillarNRest`): a
 //!   slow retract that re-speeds once the head re-seats, exactly like the
 //!   script's `wait-for-turn` cascades.
 //! - Production is **gated on the unfold**: `INBUILDSTANCE` is set at the
@@ -25,17 +26,17 @@
 //!   four tips fire `BuildLaser` beams every 60 ms.
 
 use super::super::{AnimCtx, AnimRig, Axis, UnitAnim};
+use crate::sim::{cob_sleep_frames, countdown_secs};
 
-/// Activate(): `sleep 200` between pillar unfolds.
-const READY_STAGGER: f32 = 0.2;
-/// Deactivate(): `sleep 1800` between pillar folds.
-const REST_STAGGER: f32 = 1.8;
-/// Deactivate(): `while (YARD_OPEN) { YARD_OPEN = 0; sleep 300 }`.
-const YARD_CLOSE_DELAY: f32 = 0.3;
+/// Activate(): `sleep 200` between pillar unfolds (7 frames).
+const READY_STAGGER: f32 = countdown_secs(cob_sleep_frames(200));
+/// Deactivate(): `sleep 1800` between pillar folds (55 frames).
+const REST_STAGGER: f32 = countdown_secs(cob_sleep_frames(1800));
 /// StartBuilding(): `emit-sfx 2048 from tipN; sleep 60`.
 const BUILD_EMIT_INTERVAL: f32 = 0.06;
-/// Create(): `sleep 400` between the base rise and the pillar rise.
-const PILLAR_RISE_DELAY: f32 = 0.4;
+/// Create(): `sleep 400` between the base rise and the pillar rise
+/// (13 frames).
+const PILLAR_RISE_DELAY: f32 = countdown_secs(cob_sleep_frames(400));
 /// A pillar's choreography is done once its stage passes this.
 const LAST_STAGE: u8 = 3;
 
@@ -377,13 +378,15 @@ impl UnitAnim for KernelAnim {
     }
 
     fn deactivate(&mut self, _rig: &mut AnimRig, _ctx: AnimCtx) {
-        // Deactivate(): the yard-close loop holds 300 ms, then the staged
-        // pillar-fold (one per 1800 ms across the 4).
+        // Deactivate(): `while (get YARD_OPEN)` is false from the start
+        // (`CFactory::Update` closes the yard, then calls the script),
+        // so the staged pillar-fold begins at once (one per 1800 ms
+        // across the 4).
         self.open = false;
         self.choreo = Some(ChoreoState {
             kind: Choreo::Rest,
             next: 0,
-            timer: YARD_CLOSE_DELAY,
+            timer: 0.0,
             stage: [0; 4],
         });
     }

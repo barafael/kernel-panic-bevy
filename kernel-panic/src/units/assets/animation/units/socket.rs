@@ -10,8 +10,8 @@
 //!   `SIG_COMPLETE` kills both 120 ms after the build finishes.
 //! - Once complete, `ConLasers()` bobs the inner pair out to 35 and back
 //!   at 40 elmos/s forever, and `EmitConLasers()` fires beams from them
-//!   every 60 ms while `building` (set by `Activate`, cleared at the end
-//!   of `Deactivate`, after its 300 ms `YARD_OPEN` loop).
+//!   every 60 ms while `building` (set by `Activate`, cleared by
+//!   `Deactivate`, whose `YARD_OPEN` loop finds the yard already closed).
 //! - `Activate()` sets `INBUILDSTANCE` at once: no production gate.
 
 use super::super::{AnimCtx, AnimRig, Axis, SfxKind, UnitAnim};
@@ -28,9 +28,6 @@ const BOB_SPEED: f32 = 40.0;
 const EMIT_INTERVAL: f32 = 0.06;
 /// Create(): `move body to y-axis [-16]` = −40 while building.
 const BODY_SINK: f32 = 40.0;
-/// Deactivate(): `while (YARD_OPEN) { YARD_OPEN = 0; sleep 300 }` before
-/// `building = 0`.
-const YARD_CLOSE_DELAY: f32 = 0.3;
 
 #[derive(Default)]
 pub struct SocketAnim {
@@ -43,10 +40,8 @@ pub struct SocketAnim {
     bob_out: bool,
     bob_timer: f32,
     emit_timer: f32,
-    /// `static-var building`: Activate() .. Deactivate() + 300 ms.
+    /// `static-var building`: Activate() .. Deactivate().
     building: bool,
-    /// Deactivate()'s yard-close loop still running.
-    closing: Option<f32>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -108,13 +103,6 @@ impl UnitAnim for SocketAnim {
     }
 
     fn update(&mut self, rig: &mut AnimRig, ctx: AnimCtx) {
-        if let Some(left) = &mut self.closing {
-            *left -= ctx.dt;
-            if *left <= 0.0 {
-                self.closing = None;
-                self.building = false;
-            }
-        }
         self.emit_timer -= ctx.dt;
         let emit = self.emit_timer <= 0.0;
         if emit {
@@ -173,11 +161,12 @@ impl UnitAnim for SocketAnim {
     fn activate(&mut self, _rig: &mut AnimRig, _ctx: AnimCtx) {
         // Activate(): building = 1; YARD_OPEN = 1; INBUILDSTANCE = 1.
         self.building = true;
-        self.closing = None;
     }
 
     fn deactivate(&mut self, _rig: &mut AnimRig, _ctx: AnimCtx) {
-        // Deactivate(): INBUILDSTANCE = 0; yard-close loop; building = 0.
-        self.closing = Some(YARD_CLOSE_DELAY);
+        // Deactivate(): INBUILDSTANCE = 0; `while (get YARD_OPEN)` is
+        // false from the start (`CFactory::Update` closes the yard, then
+        // calls the script); building = 0.
+        self.building = false;
     }
 }

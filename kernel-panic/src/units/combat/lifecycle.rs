@@ -314,11 +314,11 @@ pub fn death_system(
             // attacker's team at the death location (infection.lua's
             // `UnitDestroyed` fires for nanoframes too).
             if let Some(infected) = infected {
-                virus_spawns.push(VirusSpawn {
-                    position: gtf.translation(),
-                    faction: infected.attacker_faction,
-                    team: infected.attacker_team,
-                });
+                virus_spawns.push(VirusSpawn::of(
+                    infected,
+                    gtf.translation(),
+                    gtf.forward().as_vec3(),
+                ));
             }
 
             // `ForcedKillUnit` (Unit.cpp:492): `deathScriptFinished =

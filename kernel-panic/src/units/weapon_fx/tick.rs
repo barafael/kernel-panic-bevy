@@ -839,6 +839,9 @@ fn trigger_delayed_hit(
         detonated: false,
         scale: 1.0,
     });
+    // A gadget's `Explosion` returning true hides the impact's CEG
+    // (`CGameHelper::Explosion`'s `noGfx`; the hit sound still plays).
+    let mut no_gfx = false;
     match hit.on_impact {
         Some(super::shared::ImpactEffect::DenialZone {
             weapon,
@@ -847,8 +850,10 @@ fn trigger_delayed_hit(
         }) => {
             // `areadenial.lua`'s `Explosion` only starts a zone while the
             // firing unit still exists: a Pointer killed while the shell
-            // flies leaves just the blast.
-            if owners.contains(hit.attacker) {
+            // flies leaves just the blast — and not even its effect
+            // (`return true -- does not spawn the CEG`).
+            no_gfx = !owners.contains(hit.attacker);
+            if !no_gfx {
                 commands.spawn(crate::units::mechanics::command_fire::denial_zone(
                     weapon,
                     impact_pos,
@@ -861,9 +866,13 @@ fn trigger_delayed_hit(
         Some(super::shared::ImpactEffect::LogicBomb {
             owner_team,
             owner_faction,
-        }) => {
-            // `gadget:Explosion` queues it; `GameFrame` creates it
-            // (`spawn_queued_mines`, which also enforces the cap).
+        }) if owners.contains(hit.attacker) => {
+            // `Launcher.lua`: `if w == tlWeapon and owner` — a bolt whose
+            // Byte has died leaves no mine (and shows its effect); one
+            // with a live Byte is queued and its effect hidden (`return
+            // true`). `GameFrame` creates it (`spawn_queued_mines`,
+            // which also enforces the cap).
+            no_gfx = true;
             let spawn = crate::units::mechanics::command_fire::MineSpawn {
                 position: impact_pos,
                 faction: owner_faction,
@@ -877,11 +886,15 @@ fn trigger_delayed_hit(
                 }
             });
         }
-        None => {}
+        Some(super::shared::ImpactEffect::LogicBomb { .. }) | None => {}
     }
     let weapon_def = weapon_registry.by_kind(hit.weapon);
     // `CGameHelper::Explosion` plays `soundhit` where the shot lands.
     sounds.explosion(weapon_def, impact_pos);
+    if no_gfx {
+        commands.entity(entity).remove::<DelayedHit>();
+        return;
+    }
     let (rgb, radius, ceg) = (
         weapon_def.rgb_color,
         weapon_def.area_of_effect,

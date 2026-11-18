@@ -208,6 +208,44 @@ impl TeamUnitCounts {
     }
 }
 
+/// `Spring.CreateUnit`'s unit-limit test for the units Kernel Panic's
+/// gadgets create — dispatched Packets, infection Viruses, launched
+/// mines, the SIGTERM Signal (`LuaSyncedCtrl.cpp`: `if
+/// (!unitHandler.CanBuildUnit(unitDef, teamID)) return 0`). A team at
+/// its limit gets none: the gadgets go on as if the unit had been made
+/// (the Packet has left the buffer, the Terminal recharges).
+///
+/// One per system run: the tallies see a unit only once it is tagged
+/// ([`track_added_units`], next tick), so the units admitted in this run
+/// are counted here.
+pub struct CreateBudget<'a> {
+    /// Absent in bare test worlds: no limit.
+    counts: Option<&'a TeamUnitCounts>,
+    admitted: BTreeMap<u8, u32>,
+}
+
+impl<'a> CreateBudget<'a> {
+    pub fn new(counts: Option<&'a TeamUnitCounts>) -> Self {
+        Self {
+            counts,
+            admitted: BTreeMap::new(),
+        }
+    }
+
+    /// Whether `team` has room for one more unit, which is then counted.
+    pub fn admit(&mut self, team: u8) -> bool {
+        let Some(counts) = self.counts else {
+            return true;
+        };
+        let admitted = self.admitted.entry(team).or_default();
+        if counts.get(team) + *admitted >= counts.limit(team) {
+            return false;
+        }
+        *admitted += 1;
+        true
+    }
+}
+
 /// `+1` / `-1` on a per-team tally, saturating at zero.
 fn tally(counts: &mut BTreeMap<u8, u32>, team: u8, add: bool) {
     let slot = counts.entry(team).or_default();

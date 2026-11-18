@@ -256,6 +256,9 @@ impl Plugin for UnitsPlugin {
                             worm::init_autohold,
                             (
                                 worm::promote_cloak_when_built,
+                                // `SlowUpdateCloak`, before the cloak
+                                // is read this tick.
+                                worm::apply_pending_cloak,
                                 worm::activate_pending_sensors,
                             ),
                             cloak::update_cloak_detection,
@@ -277,7 +280,11 @@ impl Plugin for UnitsPlugin {
                             .chain(),
                         (
                             combat::tick_infections,
-                            command_fire::advance_pending_casts,
+                            (
+                                command_fire::advance_pending_casts,
+                                command_fire::tick_firewall_waits,
+                            )
+                                .before(command_fire::process_command_fire),
                             command_fire::run_queued_casts
                                 .before(command_fire::process_command_fire),
                             command_fire::process_command_fire,

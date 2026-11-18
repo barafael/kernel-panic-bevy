@@ -29,6 +29,10 @@ pub struct Producer {
     progress: f32,
     /// Player-enqueued build orders (FIFO).
     queue: VecDeque<UnitKind>,
+    /// Parallel to `queue`: the order was Alt-inserted under Repeat
+    /// (Spring's `INTERNAL_ORDER`), so it is built once and not
+    /// re-appended when it finishes.
+    once: VecDeque<bool>,
     /// True once this build cycle has spawned its unit underground (still
     /// rising). Reset to false when the cycle completes and the next item
     /// in the queue starts. Prevents the production system from spawning
@@ -78,6 +82,7 @@ impl Producer {
         Self {
             progress: 0.0,
             queue: VecDeque::new(),
+            once: VecDeque::new(),
             unit_spawned: false,
             spawn_count: 0,
             repeat: false,
@@ -94,7 +99,7 @@ impl Producer {
     pub fn spamming(kind: UnitKind) -> Self {
         let mut producer = Self::new();
         producer.repeat = true;
-        producer.queue.push_back(kind);
+        producer.enqueue(kind);
         producer
     }
 
@@ -111,13 +116,26 @@ impl Producer {
         self.repeat = on;
     }
 
-    /// Pop the finished front unit, re-appending it when on repeat.
+    /// Pop the finished front unit, re-appending it when on repeat —
+    /// unless it was Alt-inserted (`CCommandAI::FinishCommand` re-queues
+    /// only orders without `INTERNAL_ORDER`).
     fn complete_front(&mut self) {
+        let once = self.once.pop_front().unwrap_or(false);
         if let Some(done) = self.queue.pop_front()
             && self.repeat
+            && !once
         {
-            self.queue.push_back(done);
+            self.enqueue(done);
         }
+    }
+
+    /// `CFactory::StopBuild`: the build under way is abandoned. Returns
+    /// the unit on the pad, which the caller removes (the engine kills
+    /// it as reclaimed: no blast, no wreck).
+    fn stop_build(&mut self) -> Option<Entity> {
+        self.progress = 0.0;
+        self.unit_spawned = false;
+        self.buildee.take()
     }
 
     /// Fraction of the current build done, `0..=1` (the build bar's
@@ -155,45 +173,67 @@ impl Producer {
     /// can stack as many orders as they want (build bar, command panel, AI).
     pub fn enqueue(&mut self, kind: UnitKind) {
         self.queue.push_back(kind);
+        self.once.push_back(false);
     }
 
-    /// Spring `CFactoryCAI` Alt+click: put `count` × `kind` at the front
-    /// of the queue. A unit already in progress keeps building (it is
-    /// never swapped out mid-build), so the new orders go right behind it.
-    pub fn enqueue_front(&mut self, kind: UnitKind, count: u32) {
-        let at = usize::from(self.progress > 0.0 || self.unit_spawned).min(self.queue.len());
-        for _ in 0..count {
-            self.queue.insert(at, kind);
+    /// Spring `CFactoryCAI` Alt+click (`GiveCommandReal`). On Repeat the
+    /// `count` × `kind` go right behind the front order as one-shot
+    /// orders (`INTERNAL_ORDER`: built once, never re-appended). Off
+    /// Repeat they go to the very front, and `BuildeeChangeCheck` stops
+    /// a build of another kind under way: the unit on the pad is
+    /// returned for the caller to remove, and its order — still queued
+    /// behind the new ones — starts over later.
+    #[must_use = "the cancelled buildee has to be removed"]
+    pub fn enqueue_front(&mut self, kind: UnitKind, count: u32) -> Option<Entity> {
+        if self.repeat {
+            let at = self.queue.len().min(1);
+            for _ in 0..count {
+                self.queue.insert(at, kind);
+                self.once.insert(at, true);
+            }
+            return None;
         }
+        let building = self
+            .unit_spawned
+            .then(|| self.current_production())
+            .flatten();
+        for _ in 0..count {
+            self.queue.push_front(kind);
+            self.once.push_front(false);
+        }
+        if count > 0 && building != Some(kind) {
+            return self.stop_build();
+        }
+        None
     }
 
     /// Cancel every order and repeat (an owner left play: its factories
     /// stand idle for an ally to take). A unit already rising out of the
-    /// pad finishes, as a right-click couldn't cancel it either.
+    /// pad finishes.
     pub fn cancel_all(&mut self) {
         self.repeat = false;
-        let mut kinds: Vec<UnitKind> = Vec::new();
-        for &kind in &self.queue {
-            if !kinds.contains(&kind) {
-                kinds.push(kind);
-            }
-        }
-        for kind in kinds {
-            self.remove_kind(kind, u32::MAX, false);
+        let keep = usize::from(self.unit_spawned).min(self.queue.len());
+        self.queue.truncate(keep);
+        self.once.truncate(keep);
+        if keep == 0 {
+            self.progress = 0.0;
         }
     }
 
     /// Spring `CFactoryCAI` right-click: drop up to `count` queued `kind`
     /// orders, newest first — or oldest first with `from_front` (Alt).
-    /// Cancelling the order in progress resets its build progress; one
-    /// whose unit is already rising out of the pad can't be cancelled.
-    pub fn remove_kind(&mut self, kind: UnitKind, count: u32, from_front: bool) {
-        let locked_front = self.unit_spawned;
+    /// The engine turns each into a `CMD_STOP`, the front one included,
+    /// and a STOP at the front stops the build (`ExecuteStop` →
+    /// `CFactory::StopBuild`): cancelling the order in progress resets
+    /// its progress and returns the unit on the pad for the caller to
+    /// remove.
+    #[must_use = "the cancelled buildee has to be removed"]
+    pub fn remove_kind(&mut self, kind: UnitKind, count: u32, from_front: bool) -> Option<Entity> {
         let hits: Vec<usize> = self
             .queue
             .iter()
             .enumerate()
-            .filter(|&(i, k)| *k == kind && !(i == 0 && locked_front))
+            .filter(|&(_, k)| *k == kind)
             .map(|(i, _)| i)
             .collect();
         let mut picked: Vec<usize> = if from_front {
@@ -203,12 +243,15 @@ impl Producer {
         };
         // Remove back to front so earlier indices stay valid.
         picked.sort_unstable_by(|a, b| b.cmp(a));
+        let mut cancelled = None;
         for i in picked {
             self.queue.remove(i);
+            self.once.remove(i);
             if i == 0 {
-                self.progress = 0.0;
+                cancelled = self.stop_build();
             }
         }
+        cancelled
     }
 }
 
@@ -463,9 +506,10 @@ pub fn production_system(
 ) {
     let dt = time.delta_secs();
     spawns.clear();
-    // `(gs->frameNum & (UNIT_SLOWUPDATE_RATE >> 1)) == 0`: eight frames
-    // on, eight off.
-    let bugger_off_frame = tick.frame() & 8 == 0;
+    // `(gs->frameNum & (UNIT_SLOWUPDATE_RATE >> 1)) == 0`:
+    // `UNIT_SLOWUPDATE_RATE` is 15, so the mask is 7 — every eighth
+    // frame.
+    let bugger_off_frame = tick.frame() & 7 == 0;
 
     // Unit-id order: spawned units draw their `NetId`s, and the exit
     // dice roll, factory by factory (`sim`).
@@ -1131,45 +1175,85 @@ mod tests {
     }
 
     /// Right-click removes newest-first (Alt: oldest-first); cancelling
-    /// the order in progress resets its progress; Alt+click queues at the
-    /// front but behind a build already under way.
+    /// the order in progress resets its progress and hands back the unit
+    /// on the pad (`CFactory::StopBuild`). Alt+click off Repeat goes to
+    /// the very front and stops a build of another kind; on Repeat it
+    /// queues one-shot orders right behind the front.
     #[test]
     fn spring_queue_edits() {
+        let kinds = |p: &Producer| p.queue().iter().copied().collect::<Vec<_>>();
+        let pad = Some(Entity::PLACEHOLDER);
         let mut p = Producer::new();
         for k in [UnitKind::Bit, UnitKind::Byte, UnitKind::Bit, UnitKind::Bit] {
             p.enqueue(k);
         }
         p.progress = 1.0;
-        p.remove_kind(UnitKind::Bit, 1, false);
-        assert_eq!(
-            p.queue().iter().copied().collect::<Vec<_>>(),
-            vec![UnitKind::Bit, UnitKind::Byte, UnitKind::Bit]
-        );
+        assert_eq!(p.remove_kind(UnitKind::Bit, 1, false), None);
+        assert_eq!(kinds(&p), [UnitKind::Bit, UnitKind::Byte, UnitKind::Bit]);
         assert_eq!(p.progress, 1.0);
-        p.remove_kind(UnitKind::Bit, 1, true);
+        assert_eq!(p.remove_kind(UnitKind::Bit, 1, true), None, "no unit yet");
         assert_eq!(p.current_production(), Some(UnitKind::Byte));
         assert_eq!(p.progress, 0.0, "cancelling the front resets progress");
-        p.progress = 0.5;
-        p.enqueue_front(UnitKind::Pointer, 2);
+
+        // Alt+click off Repeat: to the very front, and the Byte rising on
+        // the pad is stopped (its order stays queued behind).
+        (p.unit_spawned, p.buildee, p.progress) = (true, pad, 0.5);
+        assert_eq!(p.enqueue_front(UnitKind::Pointer, 2), pad);
         assert_eq!(
-            p.queue().iter().copied().collect::<Vec<_>>(),
-            vec![
+            kinds(&p),
+            [
+                UnitKind::Pointer,
+                UnitKind::Pointer,
                 UnitKind::Byte,
-                UnitKind::Pointer,
-                UnitKind::Pointer,
                 UnitKind::Bit
             ]
         );
+        assert!(!p.unit_spawned && p.buildee.is_none());
+        assert_eq!(p.progress, 0.0);
+        // The kind already on the pad: the build goes on.
+        (p.unit_spawned, p.buildee, p.progress) = (true, pad, 0.5);
+        assert_eq!(p.enqueue_front(UnitKind::Pointer, 1), None);
+        assert!(p.unit_spawned);
+        assert_eq!(p.progress, 0.5);
+
         let mut idle = Producer::new();
         idle.enqueue(UnitKind::Bit);
-        idle.enqueue_front(UnitKind::Byte, 1);
+        assert_eq!(idle.enqueue_front(UnitKind::Byte, 1), None);
         assert_eq!(idle.current_production(), Some(UnitKind::Byte));
-        // A unit already rising out of the pad can't be cancelled.
+
+        // A unit rising out of the pad goes with its order: the newest
+        // order first, the one in progress last.
         let mut rising = Producer::new();
         rising.enqueue(UnitKind::Bit);
-        rising.unit_spawned = true;
-        rising.remove_kind(UnitKind::Bit, 5, false);
-        assert_eq!(rising.queue().len(), 1);
+        rising.enqueue(UnitKind::Bit);
+        (rising.unit_spawned, rising.buildee) = (true, pad);
+        assert_eq!(rising.remove_kind(UnitKind::Bit, 1, false), None);
+        assert!(rising.unit_spawned);
+        assert_eq!(rising.remove_kind(UnitKind::Bit, 5, false), pad);
+        assert!(rising.queue().is_empty() && !rising.unit_spawned);
+
+        // On Repeat an Alt+click queues behind the front, built once.
+        let mut cycle = Producer::spamming(UnitKind::Bit);
+        cycle.enqueue(UnitKind::Byte);
+        assert_eq!(cycle.enqueue_front(UnitKind::Assembler, 1), None);
+        assert_eq!(
+            kinds(&cycle),
+            [UnitKind::Bit, UnitKind::Assembler, UnitKind::Byte]
+        );
+        cycle.complete_front();
+        cycle.complete_front();
+        assert_eq!(kinds(&cycle), [UnitKind::Byte, UnitKind::Bit]);
+
+        // An owner leaving play cancels everything but the unit rising.
+        let mut left = Producer::spamming(UnitKind::Bit);
+        left.enqueue(UnitKind::Byte);
+        (left.unit_spawned, left.buildee) = (true, pad);
+        left.cancel_all();
+        assert_eq!(kinds(&left), [UnitKind::Bit]);
+        assert!(!left.repeat() && left.unit_spawned);
+        left.unit_spawned = false;
+        left.cancel_all();
+        assert!(left.queue().is_empty());
     }
 
     /// Repeat re-appends the finished unit behind anything the player

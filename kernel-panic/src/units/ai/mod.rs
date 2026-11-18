@@ -517,7 +517,11 @@ fn snapshot(
             kind,
             pos: gtf.translation(),
             mobile: stats.speed > 0.0,
-            idle: !emerging && mp.is_none() && !order.active(),
+            // The AI never orders an attack on the ground itself: a unit
+            // with one is a Pointer shelling the spot of its last NX,
+            // which upstream KPAI re-dispatches with the next mission
+            // (`DispatchArty` doesn't look at the queue).
+            idle: !emerging && (order.attacks_ground() || mp.is_none() && !order.active()),
             ready: !emerging && !cooldown && !casting,
             dispatching,
             protected,
@@ -955,8 +959,9 @@ fn run_army(
 /// dispatches ports toward the spot it is attacking, with no say from
 /// the fairness budget (only counter-dispatch consults `Lack`).
 ///
-/// A cast is a `DispatchOrder` that runs on the teleporter's next slow
-/// update, one pass of up to 12 Packets (the AI never holds Alt). So
+/// A cast is a `DispatchOrder` that runs when it arrives (later for a
+/// paralysed teleporter), one pass of up to 12 Packets (the AI never
+/// holds Alt). So
 /// the AI skips teleporters with an order still pending, and its local
 /// `buffer` bookkeeping is only a conservative same-tick approximation
 /// — the resource is the truth.

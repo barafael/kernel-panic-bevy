@@ -330,20 +330,23 @@ pub fn turn_into_features(
         .filter_map(|(entity, kind, faction, color, tf, id, infected)| {
             let def = defs.get(registry.finished_feature(kind.0)?)?;
             let color = color.map_or(TeamColor::of_faction(*faction), |c| c.0);
-            Some((*id, entity, def, color, tf.translation, infected.cloned()))
+            let virus = infected.map(|infected| {
+                crate::units::combat::VirusSpawn::of(
+                    infected,
+                    tf.translation,
+                    tf.forward().as_vec3(),
+                )
+            });
+            Some((*id, entity, def, color, tf.translation, virus))
         })
         .collect();
     finished.sort_unstable_by_key(|(id, ..)| *id);
-    for (_, entity, def, color, pos, infected) in finished {
+    for (_, entity, def, color, pos, virus) in finished {
         commands.entity(entity).despawn();
         // `UnitDestroyed` runs for it too: an infected frame still
         // releases its Virus (infection.lua).
-        if let Some(infected) = infected {
-            virus_spawns.push(crate::units::combat::VirusSpawn {
-                position: pos,
-                faction: infected.attacker_faction,
-                team: infected.attacker_team,
-            });
+        if let Some(virus) = virus {
+            virus_spawns.push(virus);
         }
         spawn_feature(def, pos, Some(color), &mut commands, &mut assets.draw());
     }

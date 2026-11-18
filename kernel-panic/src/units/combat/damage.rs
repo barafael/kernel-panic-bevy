@@ -22,7 +22,7 @@ use bevy::prelude::*;
 
 use super::{ByteOpen, Dying, IdleTimer, PARALYZE_DECLINE, StunCharge, Stunned};
 use crate::net::NetId;
-use crate::sim::{DetFloat, RngStream, SimRng, SimTick};
+use crate::sim::{DetFloat, Heading, RngStream, SimRng, SimTick, cob_sleep_frames, countdown_secs};
 use crate::units::components::{Faction, Health, TeamId, UnitType};
 use crate::units::content::definitions::UnitKind;
 use crate::units::content::unit_registry::UnitRegistry;
@@ -198,8 +198,28 @@ pub struct Infected {
 #[derive(Debug, Clone, Copy)]
 pub struct VirusSpawn {
     pub position: Vec3,
+    /// The build facing the Virus is created on.
+    pub heading: Heading,
     pub faction: Faction,
     pub team: u8,
+}
+
+impl VirusSpawn {
+    /// infection.lua `UnitDestroyed`: a Virus for the infector's team
+    /// where the infected unit was (`position`, heading along
+    /// `forward`), created on the build facing `floor((heading + 106496)
+    /// / 16384) mod 4` — the quarter turn nearest the opposite of the
+    /// way the unit was heading.
+    pub fn of(infected: &Infected, position: Vec3, forward: Vec3) -> Self {
+        let heading = i32::from(Heading::from_vector(forward.x, forward.z).0);
+        let facing = (heading + 106_496).div_euclid(16_384).rem_euclid(4);
+        Self {
+            position,
+            heading: Heading::from_facing(facing as u8),
+            faction: infected.attacker_faction,
+            team: infected.attacker_team,
+        }
+    }
 }
 
 #[derive(Resource, Default)]
@@ -281,29 +301,37 @@ struct ArmoredScript {
 /// whose script never sets the flag (homebases, Exploit, Virus, Logic
 /// Bomb, Debug, Bad Block, Signal) return `None`.
 fn armored_script(kind: UnitKind) -> Option<ArmoredScript> {
-    let after_build = match kind {
+    // The script's `sleep` (ms) between the build loop and `set ARMORED
+    // to 0`.
+    let sleep_ms = match kind {
         // Buildings drop the flag the moment they finish.
         UnitKind::Socket
         | UnitKind::Window
         | UnitKind::Port
         | UnitKind::Firewall
         | UnitKind::Terminal
-        | UnitKind::Obelisk => 0.0,
-        UnitKind::Bit => 2.5,
-        UnitKind::Bug => 3.0,
-        UnitKind::Pointer | UnitKind::Dos => 4.0,
+        | UnitKind::Obelisk => 0,
+        UnitKind::Bit => 2500,
+        UnitKind::Bug => 3000,
+        UnitKind::Pointer | UnitKind::Dos => 4000,
         UnitKind::Assembler
         | UnitKind::Trojan
         | UnitKind::Gateway
         | UnitKind::Packet
         | UnitKind::Connection
         | UnitKind::Worm
-        | UnitKind::Flow => 5.0,
-        UnitKind::Byte => 6.0,
+        | UnitKind::Flow => 5000,
+        UnitKind::Byte => 6000,
         _ => return None,
     };
     Some(ArmoredScript {
-        after_build,
+        // A COB sleep lasts whole frames (`sleep 2500` is 76, `sleep
+        // 5000` is 152: a frame or two more than the milliseconds say).
+        after_build: if sleep_ms == 0 {
+            0.0
+        } else {
+            countdown_secs(cob_sleep_frames(sleep_ms))
+        },
         only_if_built: kind == UnitKind::Bug,
     })
 }
@@ -476,10 +504,17 @@ impl DamageResolver<'_, '_> {
                 }
             }
         }
-        // `CUnit::DoDamage`: remember who hurt it last (an enemy unit).
+        // `CUnit::DoDamage` → `SetLastAttacker`: remember who hurt it
+        // last — an enemy unit. An allied team's stray blast (NX fire,
+        // a death explosion, Wormsplash) is not recorded
+        // (`teamHandler.AlliedTeams(team, attacker->team)` returns
+        // early), so nobody guards against, or prefers to shoot, a friend.
         if damage > 0.0
             && let Some(attacker) = hit.attacker
-            && attacker.team != team
+            && !self
+                .alliances
+                .as_deref()
+                .map_or(attacker.team == team, |a| a.friendly(attacker.team, team))
         {
             self.commands
                 .entity(hit.target)
@@ -1753,9 +1788,10 @@ mod tests {
         // One registered system, so `Added` is judged against its last run.
         let system = app.world_mut().register_system(update_armored);
         app.world_mut().run_system(system).unwrap();
+        // `sleep 2500` is 76 frames, `sleep 3000` 91.
         assert_eq!(
             app.world().get::<Armored>(bit).map(|a| a.after_build),
-            Some(2.5)
+            Some(crate::sim::countdown_secs(76))
         );
         assert!(app.world().get::<Armored>(built_bug).is_some());
         assert!(app.world().get::<Armored>(packed_bug).is_none());
@@ -1768,7 +1804,7 @@ mod tests {
             "the spawner's grace stands"
         );
 
-        // 3 s later the Bit's 2.5 s grace is over; the Bug is still
+        // 3 s later the Bit's ~2.5 s grace is over; the Bug is still
         // under construction, so its grace hasn't started.
         app.world_mut()
             .resource_mut::<Time>()
@@ -1778,7 +1814,7 @@ mod tests {
         assert!(app.world().get::<Armored>(dispatched).is_none());
         assert_eq!(
             app.world().get::<Armored>(built_bug).map(|a| a.after_build),
-            Some(3.0)
+            Some(crate::sim::countdown_secs(91))
         );
     }
 

@@ -455,6 +455,42 @@ fn cast_limit(kind: UnitKind, weapons: &WeaponRegistry) -> CastReachLimit<'_> {
     }
 }
 
+/// A Firewall's cast given while it recharges. `network_reflectorshield.lua`'s
+/// `CommandFallback` answers `return true, false` then: the order stays
+/// the Firewall's and the engine runs it again on each of its slow
+/// updates, so it fires on the first one after the recharge ([`tick_firewall_waits`]).
+#[derive(Component, Debug, Clone, Copy)]
+#[component(storage = "SparseSet")]
+pub struct FirewallWait {
+    pub target: Vec3,
+}
+
+/// Re-run each waiting Firewall cast ([`FirewallWait`]) on its slow
+/// update once the recharge is over.
+#[allow(clippy::type_complexity)]
+pub fn tick_firewall_waits(
+    tick: Res<crate::sim::SimTick>,
+    waiting: Query<
+        (Entity, &NetId, &FirewallWait, Option<&CommandFireCooldown>),
+        (Without<Dying>, Without<crate::units::combat::Stunned>),
+    >,
+    mut events: MessageWriter<CommandFireEvent>,
+    mut commands: Commands,
+) {
+    let frame = tick.frame();
+    for (entity, id, wait, cd) in waiting.iter().sort::<&NetId>() {
+        if !crate::sim::slow_update_due(frame, id.0) || cd.is_some_and(|c| c.remaining > 0.0) {
+            continue;
+        }
+        commands.entity(entity).remove::<FirewallWait>();
+        events.write(CommandFireEvent {
+            attacker: entity,
+            target: wait.target,
+            queued: false,
+        });
+    }
+}
+
 /// A mobile caster walking toward an out-of-range ability target.
 /// [`advance_pending_casts`] fires the ability once the target is
 /// in reach ([`cast_limit`]), mirroring how Spring's command-fire attack
@@ -504,10 +540,7 @@ pub fn run_queued_casts(
         commands.entity(entity).remove::<QueuedCast>();
         if unit.0.is_teleporter() {
             commands.entity(entity).insert(
-                crate::units::mechanics::network_buffer::DispatchOrder {
-                    target: cast.target,
-                    until_empty: cast.auto,
-                },
+                crate::units::mechanics::network_buffer::DispatchOrder::new(cast.target, cast.auto),
             );
         } else {
             events.write(CommandFireEvent {
@@ -744,6 +777,7 @@ pub fn process_command_fire(
     mut sounds: Option<ResMut<crate::audio::SoundQueue>>,
     mut commands: Commands,
     alliances: Res<Alliances>,
+    unit_counts: Option<Res<crate::units::lifecycle::bookkeeping::TeamUnitCounts>>,
 ) {
     let gravity = gravity.as_deref().copied().unwrap_or_default().0;
     for event in events.read() {
@@ -751,7 +785,13 @@ pub fn process_command_fire(
         else {
             continue;
         };
-        if cd.is_some_and(|c| c.remaining > 0.0) {
+        // Recharging: the Terminal's SIGTERM (`airstrike.lua`, `return
+        // true, true`) and the Byte's mines (`LaunchMines` returns at
+        // once) drop the order. The Firewall keeps it (below), and the
+        // NX is a weapon order (`specialattack.lua` swaps it for an
+        // ATTACK): the Pointer aims and fires once reloaded.
+        let recharging = cd.is_some_and(|c| c.remaining > 0.0);
+        if recharging && !matches!(unit.0, UnitKind::Pointer | UnitKind::Firewall) {
             continue;
         }
         match cast_reach(
@@ -782,6 +822,13 @@ pub fn process_command_fire(
             commands
                 .entity(event.attacker)
                 .remove::<(PendingCommandFire, MoveTarget, MovePath)>();
+        }
+
+        if recharging && unit.0 == UnitKind::Firewall {
+            begin_cast(&mut commands.entity(event.attacker), event.queued).insert(FirewallWait {
+                target: event.target,
+            });
+            continue;
         }
 
         if unit.0 == UnitKind::Firewall {
@@ -834,7 +881,15 @@ pub fn process_command_fire(
             // facing the way the Terminal faces, and given an attack
             // order on the point; it takes off from there. No `UnitType`
             // on either stage → not in the spatial index → not
-            // targetable.
+            // targetable. The Signal is a unit upstream: a team at its
+            // unit limit gets none (`Spring.CreateUnit`), and the
+            // Terminal recharges all the same.
+            if unit_counts.as_deref().is_some_and(|c| c.at_limit(team.0)) {
+                commands.entity(event.attacker).insert(CommandFireCooldown {
+                    remaining: SIGTERM_COOLDOWN,
+                });
+                continue;
+            }
             let caster_pos = gtf.translation();
             let facing = gtf.forward().xz().normalize_or(Vec2::NEG_Y);
             let signal = SigTermSignal {
@@ -866,10 +921,20 @@ pub fn process_command_fire(
 
         if unit.0 == UnitKind::Pointer {
             // The NX Flag is weapon 2 of the Pointer: `specialattack.lua`
-            // turns the order into an attack command (replacing the
-            // current one), and the script fires it only once the cube
-            // is open and aimed — [`tick_nx_casts`] does the rest.
-            begin_cast(&mut commands.entity(event.attacker), event.queued).insert(NxCast::Aiming {
+            // sets the script's `aimingSpecial` and puts an attack on the
+            // ground point at the front of the queue (`CMD.INSERT {0,
+            // CMD.ATTACK, …}`). The script fires weapon 2 once the cube
+            // is open, aimed and reloaded ([`tick_nx_casts`]); the
+            // attack order outlives the shot, so after `FireWeapon2`'s
+            // 2 s weapon 1 shells the spot until the player says
+            // otherwise.
+            let mut ec = commands.entity(event.attacker);
+            begin_cast(&mut ec, event.queued);
+            crate::interaction::install_command(
+                &mut ec,
+                crate::interaction::movement::QueuedCommand::AttackGround(event.target),
+            );
+            ec.insert(NxCast::Aiming {
                 target: event.target,
             });
             continue;
@@ -1032,6 +1097,7 @@ pub fn tick_nx_casts(
             &TeamId,
             &Faction,
             &NetId,
+            Option<&CommandFireCooldown>,
         ),
         // A paralyzed Pointer's script doesn't run its weapons.
         (Without<Dying>, Without<crate::units::combat::Stunned>),
@@ -1049,7 +1115,7 @@ pub fn tick_nx_casts(
         return;
     };
     let launch = crate::units::combat::AimLaunch::of(Some(weapon_def), pieces.map_gravity());
-    for (entity, mut cast, gtf, unit, team, faction, _) in casters.iter_mut().sort::<&NetId>() {
+    for (entity, mut cast, gtf, unit, team, faction, _, cd) in casters.iter_mut().sort::<&NetId>() {
         let target = match *cast {
             NxCast::Recovering { left } => {
                 if left <= dt {
@@ -1093,6 +1159,11 @@ pub fn tick_nx_casts(
         }
         if !crate::units::combat::aim_gates_pass(entity, unit.0, gtf, target, launch, true, &pieces)
         {
+            continue;
+        }
+        // Aimed, but weapon 2 is still reloading: it stays on target
+        // (and weapon 1 stays blocked) until it may fire.
+        if cd.is_some_and(|c| c.remaining > 0.0) {
             continue;
         }
 
@@ -1365,6 +1436,11 @@ pub fn tick_command_fire_cooldown(
 /// all apply. A zone whose owner died is handed to a homebase, else a
 /// minifac, of the owner's team (upstream picks one at random; the
 /// first found here), else credited to nobody.
+///
+/// The gadget damages on every `GameFrame` up to and including the
+/// expiry frame, then drops the zone: `ttl` damage ticks. So the zone
+/// goes after its last tick's damage, once less than half a frame is
+/// left (the countdown's float steps land a hair either side of zero).
 #[allow(clippy::too_many_arguments)]
 pub fn tick_area_denial(
     time: Res<Time>,
@@ -1378,9 +1454,8 @@ pub fn tick_area_denial(
     let dt = time.delta_secs();
     for (zone_entity, mut zone) in &mut zones {
         zone.remaining -= dt;
-        if zone.remaining <= 0.0 {
+        if zone.remaining < dt * 0.5 {
             commands.entity(zone_entity).despawn();
-            continue;
         }
         if zone.owner.is_none_or(|owner| !units.contains(owner)) {
             zone.owner = substitute_owner(zone.owner_team, &units);
@@ -2024,6 +2099,71 @@ mod tests {
         let aim = app.world().get::<InfectionCast>(obelisk).unwrap();
         assert_eq!(aim.left, INFECTION_AIM_SECS);
         assert!(app.world().get::<CommandFireCooldown>(obelisk).is_none());
+    }
+
+    /// `specialattack.lua` swaps the NX order for an attack on the ground
+    /// point, which stays the Pointer's order after the shot; one given
+    /// during the 30 s reload is kept (the Pointer aims and waits), not
+    /// dropped.
+    #[test]
+    fn an_nx_leaves_an_attack_on_the_spot_and_waits_out_the_reload() {
+        let mut app = cast_app(&[("pointer", 2.0)]);
+        let pointer = spawn_caster(&mut app, UnitKind::Pointer, Vec3::ZERO);
+        app.world_mut()
+            .entity_mut(pointer)
+            .insert(CommandFireCooldown { remaining: 10.0 });
+        let target = Vec3::new(1000.0, 0.0, 0.0);
+        cast(&mut app, pointer, target);
+        assert_eq!(
+            app.world().get::<NxCast>(pointer).copied(),
+            Some(NxCast::Aiming { target })
+        );
+        assert_eq!(
+            app.world()
+                .get::<crate::units::combat::AttackGroundOrder>(pointer)
+                .map(|o| o.pos),
+            Some(target)
+        );
+    }
+
+    /// `network_reflectorshield.lua`: a Firewall cast during the recharge
+    /// stays its order (`return true, false`) and runs on the first slow
+    /// update after the recharge; SIGTERM's is dropped (`return true,
+    /// true`).
+    #[test]
+    fn a_firewall_cast_waits_for_its_recharge() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut app = cast_app(&[]);
+        let firewall = spawn_caster(&mut app, UnitKind::Firewall, Vec3::ZERO);
+        let terminal = spawn_caster(&mut app, UnitKind::Terminal, Vec3::X * 500.0);
+        for unit in [firewall, terminal] {
+            app.world_mut()
+                .entity_mut(unit)
+                .insert((CommandFireCooldown { remaining: 1.0 }, NetId(3)));
+            cast(&mut app, unit, Vec3::new(100.0, 0.0, 0.0));
+        }
+        assert!(app.world().get::<FirewallWait>(firewall).is_some());
+        assert!(app.world().get::<FirewallWait>(terminal).is_none());
+
+        let run = |app: &mut App, frame: u64| -> usize {
+            app.world_mut().insert_resource(crate::sim::SimTick(frame));
+            app.world_mut()
+                .run_system_once(tick_firewall_waits)
+                .unwrap();
+            app.world_mut()
+                .resource_mut::<Messages<CommandFireEvent>>()
+                .drain()
+                .count()
+        };
+        // Still recharging on its slow update (frame + 3 ≡ 0 mod 15).
+        assert_eq!(run(&mut app, 12), 0);
+        app.world_mut()
+            .get_mut::<CommandFireCooldown>(firewall)
+            .unwrap()
+            .remaining = 0.0;
+        assert_eq!(run(&mut app, 13), 0, "between slow updates");
+        assert_eq!(run(&mut app, 27), 1);
+        assert!(app.world().get::<FirewallWait>(firewall).is_none());
     }
 
     /// A move or stop order ends a pending NX shot like any other order

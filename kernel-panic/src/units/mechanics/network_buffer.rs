@@ -16,13 +16,14 @@ use bevy::prelude::*;
 use crate::interaction::movement::{MoveTarget, NavGridSet};
 use crate::net::NetId;
 use crate::sim::{
-    DetFloat, GAME_SPEED, Heading, SQUARE_SIZE, SimTick, frames_to_secs, slow_update_due,
+    DetFloat, GAME_SPEED, Heading, SQUARE_SIZE, SimTick, cob_sleep_frames, countdown_secs,
+    frames_to_secs, slow_update_due,
 };
 use crate::units::combat::{Armored, Dying};
 use crate::units::components::{Faction, TeamId, UnitType};
 use crate::units::content::definitions::UnitKind;
 use crate::units::content::unit_registry::UnitRegistry;
-use crate::units::lifecycle::bookkeeping::TeamUnitCounts;
+use crate::units::lifecycle::bookkeeping::{CreateBudget, TeamUnitCounts};
 use crate::units::lifecycle::spawning::{Emerging, SpawnContext, spawn_unit_facing};
 
 /// Seconds between per-Port buffer increments. network_buffer.lua
@@ -72,7 +73,7 @@ pub const SPAWN_STUN_SECONDS: f32 = frames_to_secs(180.0);
 /// time moves 33 ms a frame and a thread wakes once it is past its wake
 /// time, so the sleep is 16 frames. `Create()`'s own 5 s grace then
 /// clears a flag that is already down.
-const SPAWNED_ARMORED_SECONDS: f32 = frames_to_secs(16.0);
+const SPAWNED_ARMORED_SECONDS: f32 = countdown_secs(cob_sleep_frames(500));
 
 /// Max distance (elmos) at which a Packet can enter a teleporter.
 /// Upstream `enterDist=150`.
@@ -85,53 +86,100 @@ pub const ENTER_DISTANCE: f32 = 150.0;
 #[component(storage = "SparseSet")]
 pub struct EnterOrder {
     pub target: Entity,
+    /// The order has had its first tick. The engine runs a command the
+    /// moment it becomes the unit's order (`CCommandAI::GiveAllowedCommand`
+    /// on an empty queue, `FinishCommand` on a promotion: both call
+    /// `SlowUpdate`) and after that only on the unit's slow updates. A
+    /// unit that is paralysed or unfinished at that moment misses the
+    /// run and waits for a slow update like any other.
+    ///
+    /// Kept in the order, never read from Bevy's change detection: a
+    /// sorted query answers `is_added` from the world's ticks, which
+    /// move with the app's frames, not with the sim's — two peers (or a
+    /// frame that runs two sim ticks) would disagree.
+    started: bool,
 }
 
-/// `network_enter.lua`'s approach: a Packet with an [`EnterOrder`] walks
-/// to its teleporter (the goal refreshed when it drifts) until within
-/// three quarters of [`ENTER_DISTANCE`], then stops and asks to enter,
-/// which [`process_enter`] grants to the nearest friendly teleporter
-/// in range — this one. A target that is gone ends the order; a
-/// stunned Packet waits.
+impl EnterOrder {
+    pub fn new(target: Entity) -> Self {
+        Self {
+            target,
+            started: false,
+        }
+    }
+}
+
+/// `network_enter.lua`'s `CommandFallback` for a Packet with an
+/// [`EnterOrder`], run as the engine runs it: the moment the order
+/// becomes the Packet's order and then on each of its slow updates. Within [`ENTER_DISTANCE`] of the teleporter on the
+/// ground plane and past its spawn stun, the Packet asks to enter that
+/// teleporter ([`process_enter`] takes it this tick). Otherwise the
+/// order stays (`return true, false`) and the Packet is sent to within
+/// three quarters of that distance (`SetUnitMoveGoal(…, enterDist *
+/// .75)`: a move goal with a radius, which the walk ends at on whatever
+/// frame it gets there), where it waits out what is left of the stun. A
+/// target that is gone ends the order; a paralysed Packet's orders
+/// don't run.
 #[allow(clippy::type_complexity)]
 pub fn tick_enter_orders(
-    packets: Query<
+    tick: Res<SimTick>,
+    mut packets: Query<
         (
             Entity,
             &Transform,
-            &EnterOrder,
+            &mut EnterOrder,
+            Has<PacketSpawnStun>,
+            Has<crate::units::combat::Stunned>,
             Has<crate::interaction::movement::MoveTarget>,
             Option<&crate::interaction::movement::MovePath>,
             &crate::net::NetId,
         ),
-        (Without<Dying>, Without<crate::units::combat::Stunned>),
+        Without<Dying>,
     >,
     teleporters: Query<&Transform, Without<Dying>>,
     mut enter: MessageWriter<EnterEvent>,
     mut commands: Commands,
 ) {
     use crate::interaction::movement::{MovePath, MoveTarget, chase_path_stale};
+    let frame = tick.frame();
     let reach = ENTER_DISTANCE * 0.75;
-    for (packet, tf, order, has_move, path, _) in packets.iter().sort::<&crate::net::NetId>() {
+    for (packet, tf, mut order, spawn_stunned, stunned, has_move, path, id) in
+        packets.iter_mut().sort::<&crate::net::NetId>()
+    {
+        let first = !order.started;
+        if first {
+            order.started = true;
+        }
+        if stunned {
+            continue;
+        }
+        let due = first || slow_update_due(frame, id.0);
         let Ok(target_tf) = teleporters.get(order.target) else {
-            commands
-                .entity(packet)
-                .remove::<(EnterOrder, MoveTarget, MovePath)>();
+            if due {
+                commands
+                    .entity(packet)
+                    .remove::<(EnterOrder, MoveTarget, MovePath)>();
+            }
             continue;
         };
         let at = target_tf.translation;
-        if tf.translation.distance_squared(at) > reach * reach {
-            if chase_path_stale(path, at) {
+        let dist_sq = crate::units::spatial::flat_dist_sq(tf.translation, at);
+        if due {
+            if dist_sq < ENTER_DISTANCE * ENTER_DISTANCE && !spawn_stunned {
+                enter.write(EnterEvent {
+                    packet,
+                    into: Some(order.target),
+                });
+                continue;
+            }
+            if dist_sq > reach * reach && chase_path_stale(path, at) {
                 commands.entity(packet).insert(MoveTarget(at));
             }
-            continue;
         }
-        let mut ec = commands.entity(packet);
-        ec.remove::<EnterOrder>();
-        if has_move || path.is_some() {
-            ec.remove::<(MoveTarget, MovePath)>();
+        if dist_sq <= reach * reach && (has_move || path.is_some()) {
+            // Inside the move goal's radius: stand and wait.
+            commands.entity(packet).remove::<(MoveTarget, MovePath)>();
         }
-        enter.write(EnterEvent { packet });
     }
 }
 
@@ -181,8 +229,9 @@ pub struct PacketSpawnStun {
 }
 
 /// A teleporter's Dispatch order (`CMD_DISPATCH` in its queue). The
-/// gadget runs it from `CommandFallback`, which the engine calls on the
-/// unit's slow updates: each pass puts a buffered Packet on every free
+/// gadget runs it from `CommandFallback`, which the engine calls when
+/// the order starts and on the unit's slow updates: each pass puts a
+/// buffered Packet on every free
 /// one of [`DISPATCH_SPOTS`] and sends it walking to `target`. The order
 /// ends after its first pass, or with Alt once the buffer is empty
 /// (`return true, not opts.alt or bufferSize[team]==0`), and goes with
@@ -193,13 +242,28 @@ pub struct DispatchOrder {
     pub target: Vec3,
     /// Alt: dispatch until the buffer is empty.
     pub until_empty: bool,
+    /// The order has had its first tick (as [`EnterOrder`]'s).
+    started: bool,
 }
 
-/// Event: send the given Packet into the nearest friendly teleporter's
-/// buffer. Silently ignored if the Packet is still stunned or too far.
+impl DispatchOrder {
+    pub fn new(target: Vec3, until_empty: bool) -> Self {
+        Self {
+            target,
+            until_empty,
+            started: false,
+        }
+    }
+}
+
+/// Event: send the given Packet into a teleporter's buffer — `into`
+/// (its [`EnterOrder`]'s target), or with `None` the nearest teleporter
+/// of its team. Silently ignored if the Packet is still spawn-stunned,
+/// paralysed or too far.
 #[derive(Message, Debug, Clone, Copy)]
 pub struct EnterEvent {
     pub packet: Entity,
+    pub into: Option<Entity>,
 }
 
 /// Pay out every finished Port's packets. A Port under construction
@@ -256,16 +320,23 @@ pub fn cap_packet_buffers(
     }
 }
 
-/// Run the [`DispatchOrder`]s due a slow update this frame: one pass
-/// each (`CommandFallback`'s `while index < 12 and bufferSize[team] > 0`).
+/// Run the [`DispatchOrder`]s that are due this frame: one pass each
+/// (`CommandFallback`'s `while index < 12 and bufferSize[team] > 0`).
+/// The engine runs a command the moment it becomes the unit's order
+/// and then on each of the unit's slow updates; a paralysed or
+/// unfinished teleporter runs neither (`CUnit::SlowUpdate` returns
+/// before its command AI), so its order waits.
 /// A spot that is taken costs nothing; each free one gets a Packet,
 /// spawned facing out and sent to the order's target (the gadget's
 /// `CMD.MOVE`), spawn-stunned and briefly ARMORED (packet.bos
-/// `Spawned()`). Unit-id order: one team's teleporters share its buffer.
+/// `Spawned()`). A team at its unit limit still pays for the spot, but
+/// `Spring.CreateUnit` makes nothing: that Packet is lost
+/// ([`CreateBudget`]). Unit-id order: one team's teleporters share its
+/// buffer.
 #[allow(clippy::type_complexity)]
 pub fn tick_dispatch_orders(
     tick: Res<SimTick>,
-    orders: Query<
+    mut orders: Query<
         (
             Entity,
             &NetId,
@@ -273,19 +344,32 @@ pub fn tick_dispatch_orders(
             &TeamId,
             &Faction,
             &Transform,
-            &DispatchOrder,
+            &mut DispatchOrder,
+            Has<crate::units::combat::Stunned>,
+            Has<Emerging>,
         ),
         Without<Dying>,
     >,
     ground_units: Query<(&UnitType, &Transform), Without<Dying>>,
     nav: Option<Res<NavGridSet>>,
     mut buffer: ResMut<PacketBuffer>,
+    counts: Option<Res<TeamUnitCounts>>,
     mut ctx: SpawnContext,
 ) {
     let frame = tick.frame();
     let mut blockers = None;
-    for (entity, id, kind, team, faction, tf, order) in orders.iter().sort::<&NetId>() {
-        if !slow_update_due(frame, id.0) {
+    let mut budget = CreateBudget::new(counts.as_deref());
+    for (entity, id, kind, team, faction, tf, mut order, stunned, unfinished) in
+        orders.iter_mut().sort::<&NetId>()
+    {
+        let first = !order.started;
+        if first {
+            order.started = true;
+        }
+        if stunned || unfinished {
+            continue;
+        }
+        if !first && !slow_update_due(frame, id.0) {
             continue;
         }
         if !kind.0.is_teleporter() {
@@ -309,6 +393,9 @@ pub fn tick_dispatch_orders(
                 continue;
             }
             buffer.take(team.0, 1);
+            if !budget.admit(team.0) {
+                continue;
+            }
             let packet = spawn_unit_facing(
                 UnitKind::Packet,
                 *faction,
@@ -397,7 +484,10 @@ fn dispatch_spot_free(
 }
 
 /// Drain `EnterEvent`s — absorb Packets that are close to a
-/// friendly teleporter and have finished their post-dispatch stun.
+/// friendly teleporter and have finished their post-dispatch stun
+/// (`network_enter.lua`: `dist < enterDist`, measured on the ground
+/// plane, and `spawnStun[u] < GetGameFrame()`). A paralysed Packet
+/// executes no command.
 #[allow(clippy::type_complexity)]
 pub fn process_enter(
     mut events: MessageReader<EnterEvent>,
@@ -406,43 +496,62 @@ pub fn process_enter(
             &UnitType,
             &TeamId,
             &Transform,
-            Option<&PacketSpawnStun>,
+            Has<PacketSpawnStun>,
+            Has<crate::units::combat::Stunned>,
             Option<&crate::units::combat::Infected>,
         ),
         Without<Dying>,
     >,
-    teleporters: Query<(&UnitType, &TeamId, &Transform), Without<Dying>>,
+    teleporters: Query<(Entity, &UnitType, &TeamId, &Transform), Without<Dying>>,
     mut buffer: ResMut<PacketBuffer>,
     mut virus_spawns: ResMut<crate::units::combat::VirusSpawnQueue>,
     mut commands: Commands,
 ) {
     let enter_sq = ENTER_DISTANCE * ENTER_DISTANCE;
+    // A Packet named twice in one tick (its order and a direct Enter)
+    // enters once.
+    let mut absorbed: Vec<Entity> = Vec::new();
     for event in events.read() {
-        let Ok((packet_unit, packet_team, packet_tf, stun, infected)) = packets.get(event.packet)
+        let Ok((packet_unit, packet_team, packet_tf, spawn_stunned, stunned, infected)) =
+            packets.get(event.packet)
         else {
             continue;
         };
-        if packet_unit.0 != UnitKind::Packet || stun.is_some() {
+        if packet_unit.0 != UnitKind::Packet
+            || spawn_stunned
+            || stunned
+            || absorbed.contains(&event.packet)
+        {
             continue;
         }
-        // Nearest friendly teleporter within range.
-        let nearest = teleporters
+        // The ordered teleporter (its team was checked when the order was
+        // given, `AllowCommand`), else any teleporter of the Packet's
+        // team; within range either way.
+        let in_range = teleporters
             .iter()
-            .filter(|(t_unit, t_team, _)| t_unit.0.is_teleporter() && t_team.0 == packet_team.0)
-            .map(|(_, _, t_tf)| packet_tf.translation.distance_squared(t_tf.translation))
-            .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        if nearest.is_some_and(|d_sq| d_sq <= enter_sq) {
+            .filter(|(entity, t_unit, t_team, _)| {
+                t_unit.0.is_teleporter()
+                    && event
+                        .into
+                        .map_or(t_team.0 == packet_team.0, |into| into == *entity)
+            })
+            .any(|(_, _, _, t_tf)| {
+                crate::units::spatial::flat_dist_sq(packet_tf.translation, t_tf.translation)
+                    < enter_sq
+            });
+        if in_range {
+            absorbed.push(event.packet);
             buffer.add(packet_team.0, 1);
             // Absorbed, not killed: no `Dying`, but
             // its counters' marker hooks run on the despawn itself.
             // infection.lua's `UnitDestroyed` fires for any removal, so
             // an infected Packet still releases its Virus in the port.
             if let Some(infected) = infected {
-                virus_spawns.push(crate::units::combat::VirusSpawn {
-                    position: packet_tf.translation,
-                    faction: infected.attacker_faction,
-                    team: infected.attacker_team,
-                });
+                virus_spawns.push(crate::units::combat::VirusSpawn::of(
+                    infected,
+                    packet_tf.translation,
+                    packet_tf.forward().as_vec3(),
+                ));
             }
             commands.entity(event.packet).despawn();
         }
@@ -513,13 +622,17 @@ mod tests {
     use bevy::ecs::system::RunSystemOnce;
 
     /// `network_enter.lua`: a Packet with an Enter order walks to its
-    /// teleporter until within three quarters of `enterDist`, then asks
-    /// to enter; a teleporter that is gone ends the order.
+    /// teleporter and asks to enter it once within `enterDist` on the
+    /// ground plane, checked when the order arrives and then on the
+    /// Packet's slow updates. While it is spawn-stunned the order stays:
+    /// it walks to within three quarters of `enterDist` and waits. A
+    /// teleporter that is gone ends the order.
     #[test]
     fn an_enter_order_walks_in_then_enters() {
         use crate::interaction::movement::MoveTarget;
         let mut world = World::new();
         world.init_resource::<Messages<EnterEvent>>();
+        world.insert_resource(SimTick(1));
         let port = world
             .spawn((
                 UnitType(UnitKind::Port),
@@ -531,29 +644,100 @@ mod tests {
                 UnitType(UnitKind::Packet),
                 crate::net::NetId(1),
                 Transform::IDENTITY,
-                EnterOrder { target: port },
+                EnterOrder::new(port),
             ))
             .id();
-        world.run_system_once(tick_enter_orders).unwrap();
+        let system = world.register_system(tick_enter_orders);
+        let run = |world: &mut World, frame: u64, x: f32| -> Vec<EnterEvent> {
+            world.insert_resource(SimTick(frame));
+            world.get_mut::<Transform>(packet).unwrap().translation = Vec3::new(x, 40.0, 0.0);
+            world.run_system(system).unwrap();
+            world
+                .resource_mut::<Messages<EnterEvent>>()
+                .drain()
+                .collect()
+        };
+        // The order runs on arrival: the walk starts.
+        assert!(run(&mut world, 1, 0.0).is_empty());
         assert_eq!(
             world.get::<MoveTarget>(packet).map(|t| t.0),
             Some(Vec3::new(500.0, 0.0, 0.0))
         );
-        world.get_mut::<Transform>(packet).unwrap().translation = Vec3::new(420.0, 0.0, 0.0);
-        world.run_system_once(tick_enter_orders).unwrap();
-        assert!(world.get::<EnterOrder>(packet).is_none());
-        assert!(world.get::<MoveTarget>(packet).is_none());
-        let events: Vec<EnterEvent> = world
-            .resource_mut::<Messages<EnterEvent>>()
-            .drain()
-            .collect();
+        // 140 elmos out on the ground (higher up, which does not count):
+        // nothing until the Packet's slow update (frame + id ≡ 0 mod 15).
+        assert!(run(&mut world, 2, 360.0).is_empty());
+        let events = run(&mut world, 14, 360.0);
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].packet, packet);
+        assert_eq!((events[0].packet, events[0].into), (packet, Some(port)));
+        assert!(world.get::<EnterOrder>(packet).is_some());
+
+        // Spawn-stunned: the order is kept, the walk goes on to 112.5…
+        world
+            .entity_mut(packet)
+            .insert(PacketSpawnStun { remaining: 1.0 });
+        assert!(run(&mut world, 29, 360.0).is_empty());
+        assert!(world.get::<EnterOrder>(packet).is_some());
+        assert!(world.get::<MoveTarget>(packet).is_some());
+        // …where it stands and waits for the stun to end.
+        assert!(run(&mut world, 44, 400.0).is_empty());
+        assert!(world.get::<EnterOrder>(packet).is_some());
+        assert!(world.get::<MoveTarget>(packet).is_none());
+        world.entity_mut(packet).remove::<PacketSpawnStun>();
+        assert_eq!(run(&mut world, 59, 400.0).len(), 1);
 
         world.despawn(port);
-        world.entity_mut(packet).insert(EnterOrder { target: port });
-        world.run_system_once(tick_enter_orders).unwrap();
+        assert!(run(&mut world, 74, 400.0).is_empty());
         assert!(world.get::<EnterOrder>(packet).is_none());
+    }
+
+    /// `process_enter`: the ordered teleporter within 150 elmos on the
+    /// ground takes the Packet (height does not count); a spawn-stunned
+    /// or paralysed Packet stays out, and a Packet named twice enters
+    /// once.
+    #[test]
+    fn a_packet_enters_its_teleporter_within_ground_range() {
+        let mut world = World::new();
+        world.init_resource::<Messages<EnterEvent>>();
+        world.init_resource::<PacketBuffer>();
+        world.init_resource::<crate::units::combat::VirusSpawnQueue>();
+        let port = world
+            .spawn((
+                UnitType(UnitKind::Port),
+                TeamId(0),
+                Transform::from_xyz(0.0, 0.0, 0.0),
+            ))
+            .id();
+        let packet_at = |world: &mut World, x: f32| {
+            world
+                .spawn((
+                    UnitType(UnitKind::Packet),
+                    TeamId(0),
+                    Transform::from_xyz(x, 120.0, 0.0),
+                ))
+                .id()
+        };
+        let near = packet_at(&mut world, 140.0);
+        let far = packet_at(&mut world, 160.0);
+        let fresh = packet_at(&mut world, 100.0);
+        world
+            .entity_mut(fresh)
+            .insert(PacketSpawnStun { remaining: 1.0 });
+        let paralysed = packet_at(&mut world, 100.0);
+        world
+            .entity_mut(paralysed)
+            .insert(crate::units::combat::Stunned);
+        for packet in [near, near, far, fresh, paralysed] {
+            world.write_message(EnterEvent {
+                packet,
+                into: Some(port),
+            });
+        }
+        world.run_system_once(process_enter).unwrap();
+        assert_eq!(world.resource::<PacketBuffer>().get(0), 1);
+        assert!(world.get_entity(near).is_err(), "absorbed");
+        for kept in [far, fresh, paralysed] {
+            assert!(world.get_entity(kept).is_ok());
+        }
     }
 
     #[test]

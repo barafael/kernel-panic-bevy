@@ -148,12 +148,32 @@ use super::state::Fnv;
 /// `Entity` (which follows the allocation order: wasm and a shuffled run
 /// picked another target than native, so the orders hash and from there
 /// the sim diverged).
+/// 28 (2026-11-18, parity review): `NoChaseCategory` (an idle unit, a
+/// Fight or a guard never goes after such an enemy; a Fight marches on
+/// under one); guards retaliate only against a target they could
+/// attack; an allied hit is not a `LastAttacker`; the factory queue as
+/// `CFactoryCAI` edits it (cancelling the front stops the build and
+/// removes the unit on the pad, Alt+click under Repeat queues one-shot
+/// orders); the factory's bugger-off check every 8th frame; Enter and
+/// Dispatch run when the order arrives, then on slow updates, the Enter
+/// range on the ground plane; gadget-made units (Packets, Viruses,
+/// mines, the Signal) respect the unit limit; Viruses face away from
+/// the infected unit's heading; COB sleeps last whole frames (ARMORED
+/// grace, Hole and Kernel staging); Carrier keeps its build stance and
+/// Kernel/Socket skip the closed-yard wait; the area-denial zone deals
+/// its last tick's damage. A script's cloak change waits for the unit's
+/// slow update (`SlowUpdateCloak`: a Worm surfaces and burrows up to 14
+/// frames late, burrowing 101 frames after its last aim) and a Worm that
+/// aims fires at will at once; an NX leaves an attack on its spot and
+/// waits out the reload; a Firewall's cast during the recharge waits for
+/// it; a deploy order clears the unit's orders; a mine bolt whose Byte
+/// has died leaves no mine.
 ///
 /// [`SimCommand::Dropped`]: crate::net::SimCommand::Dropped
 /// [`SimCommand::Returned`]: crate::net::SimCommand::Returned
 /// [`SimCommand::InternalSpeed`]: crate::net::SimCommand::InternalSpeed
 /// [`MatchRules`]: crate::net::MatchRules
-pub const SIM_VERSION: u32 = 27;
+pub const SIM_VERSION: u32 = 28;
 
 /// The map-independent half of [`Compat`]: what a peer announces when
 /// it joins a room, before any map is chosen.

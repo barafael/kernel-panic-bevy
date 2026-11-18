@@ -1,8 +1,9 @@
 //! hole.bos — the Hacker homebase (linear constant 65536).
 //!
 //! - `Create()`: the nano-arm assembly (`nanoarm`, `nanomover`) is hidden.
-//! - `Activate()`: show both, fade in for 2.3 s (an alpha-threshold
-//!   effect the engine no longer draws; the delay is real), set
+//! - `Activate()`: show both, fade in over 23 × `sleep 100` — 92 frames,
+//!   3.07 s (an alpha-threshold effect the engine no longer draws; the
+//!   delay is real) — set
 //!   `INBUILDSTANCE`, then loop: for i = 16, 32, 48, 64 the arm steps out
 //!   to −i @64 while the mover returns to 0 @256 (wait both), the mover
 //!   strokes out to −55 @128 while `EmitFX()` fires the `corruption_const`
@@ -10,11 +11,12 @@
 //!   fourth stroke the mover returns and the arm snaps back to −16 @128.
 //!   One lap is about 3.1 s.
 //! - `Deactivate()`: kill the loop (pieces finish their current moves),
-//!   clear `INBUILDSTANCE`, fade out for 2.3 s, then hide and park.
+//!   clear `INBUILDSTANCE`, fade out over the same 92 frames, then hide
+//!   and park.
 
 use super::super::{AnimCtx, AnimRig, Axis, SfxKind, UnitAnim};
 use super::move_time;
-use crate::sim::DetFloat;
+use crate::sim::{DetFloat, cob_sleep_frames, countdown_secs};
 use crate::units::content::cegs::CegKind;
 
 const ARM_STEP: f32 = 16.0;
@@ -23,8 +25,9 @@ const ARM_HOME_SPEED: f32 = 128.0;
 const STROKE: f32 = 55.0;
 const STROKE_SPEED: f32 = 128.0;
 const RETURN_SPEED: f32 = 256.0;
-/// Activate()/Deactivate(): 23 × `sleep 100` alpha steps.
-const FADE_TIME: f32 = 2.3;
+/// Activate()/Deactivate(): 23 × `sleep 100` alpha steps (`for (i=240;
+/// i >= 20; i=i-10)`), each 4 frames: 92 frames, not 2.3 s.
+const FADE_TIME: f32 = countdown_secs(23 * cob_sleep_frames(100));
 /// EmitFX(): `sleep 30`.
 const EMIT_INTERVAL: f32 = 0.03;
 /// Deactivate() parks the hidden arm @64 and mover @100.
@@ -169,7 +172,7 @@ impl UnitAnim for HoleAnim {
         self.enter(rig, Phase::FadeOut);
     }
 
-    /// `INBUILDSTANCE`: production waits for the 2.3 s fade-in.
+    /// `INBUILDSTANCE`: production waits for the 92-frame fade-in.
     fn is_open(&self) -> Option<bool> {
         Some(self.in_stance)
     }
@@ -207,9 +210,10 @@ mod tests {
                 super::super::super::tick_rig(rig, 1.0 / 30.0);
             }
         };
-        step(&mut anim, &mut rig, 60);
+        // 23 × `sleep 100` = 92 frames.
+        step(&mut anim, &mut rig, 91);
         assert_eq!(anim.is_open(), Some(false));
-        step(&mut anim, &mut rig, 10);
+        step(&mut anim, &mut rig, 1);
         assert_eq!(anim.is_open(), Some(true));
         assert_eq!(anim.phase, Some(Phase::Reach(1)));
         // 16 elmos @64 = 0.25 s, then the first stroke.

@@ -20,6 +20,7 @@ use bevy::prelude::*;
 use crate::units::assets::animation::PieceIndex;
 use spring_map::map_info::MapInfo;
 
+use super::bookkeeping::{CreateBudget, TeamUnitCounts};
 use super::production::default_production;
 use crate::sim::{DetFloat, Heading};
 use crate::terrain::heightmap::Heightmap;
@@ -808,17 +809,24 @@ pub fn spawn_unit_facing(
 
 /// Drain the `VirusSpawnQueue` and spawn Virus units at the queued
 /// positions. Runs after the death system so kills in a given frame produce
-/// Viruses on the next.
+/// Viruses on the next. A team at its unit limit gets none
+/// (`Spring.CreateUnit`, [`CreateBudget`]).
 pub fn spawn_queued_viruses(
     mut virus_spawns: ResMut<crate::units::combat::VirusSpawnQueue>,
+    counts: Option<Res<TeamUnitCounts>>,
     mut ctx: SpawnContext,
 ) {
+    let mut budget = CreateBudget::new(counts.as_deref());
     for spawn in virus_spawns.drain() {
-        spawn_unit(
+        if !budget.admit(spawn.team) {
+            continue;
+        }
+        spawn_unit_facing(
             UnitKind::Virus,
             spawn.faction,
             spawn.team,
             spawn.position,
+            spawn.heading,
             &mut ctx,
         );
     }
@@ -834,12 +842,15 @@ pub fn spawn_queued_viruses(
 /// Each mine is dropped when its team already fields the Logic Bomb
 /// `UnitRestricted` cap — upstream `Launcher.lua` only calls
 /// `CreateUnit` while `#GetTeamUnitsByDefs(team, logic_bomb) <
-/// maxThisUnit`.
+/// maxThisUnit` — or stands at its unit limit, where `CreateUnit` makes
+/// nothing ([`CreateBudget`]).
 pub fn spawn_queued_mines(
     mut mine_spawns: ResMut<crate::units::mechanics::command_fire::MineSpawnQueue>,
     live_units: Query<(&UnitType, &TeamId), Without<crate::units::combat::Dying>>,
+    unit_counts: Option<Res<TeamUnitCounts>>,
     mut ctx: SpawnContext,
 ) {
+    let mut budget = CreateBudget::new(unit_counts.as_deref());
     let limit = ctx
         .unit_registry
         .team_limit(UnitKind::LogicBomb)
@@ -848,7 +859,7 @@ pub fn spawn_queued_mines(
         crate::units::lifecycle::bookkeeping::team_kind_counts(UnitKind::LogicBomb, &live_units);
     for spawn in mine_spawns.drain() {
         let count = counts.entry(spawn.team).or_default();
-        if *count >= limit {
+        if *count >= limit || !budget.admit(spawn.team) {
             continue;
         }
         *count += 1;

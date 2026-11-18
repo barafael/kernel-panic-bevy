@@ -331,6 +331,9 @@ pub(crate) struct ApplyCtx<'w, 's> {
     autohold: Query<'w, 's, &'static mut AutoHold>,
     /// `network_enter.lua`'s `not GetUnitIsStunned(teleporter)`.
     stunned: Query<'w, 's, (), With<crate::units::combat::Stunned>>,
+    /// The other half of `GetUnitIsStunned`'s first value: a unit still
+    /// being built.
+    unfinished: Query<'w, 's, (), With<crate::units::lifecycle::spawning::Emerging>>,
     /// Last tick's spatial snapshot (area orders expand through it);
     /// bare test worlds have none.
     spatial: Option<Res<'w, crate::units::spatial::SpatialIndex>>,
@@ -720,8 +723,12 @@ impl ApplyCtx<'_, '_> {
                     if !factory_roster(own.kind).contains(kind) {
                         continue;
                     }
-                    if let Ok(mut producer) = self.producers.get_mut(own.e) {
-                        apply_factory_op(&mut producer, *kind, *op);
+                    if let Ok(mut producer) = self.producers.get_mut(own.e)
+                        && let Some(buildee) = apply_factory_op(&mut producer, *kind, *op)
+                    {
+                        // `CFactory::StopBuild`: the cancelled unit goes
+                        // silently, as a factory's orphaned buildee does.
+                        self.commands.entity(buildee).try_despawn();
                     }
                 }
             }
@@ -786,7 +793,10 @@ impl ApplyCtx<'_, '_> {
                     if own.kind == UnitKind::Packet
                         && let Some(m) = self.enter.as_mut()
                     {
-                        m.write(EnterEvent { packet: own.e });
+                        m.write(EnterEvent {
+                            packet: own.e,
+                            into: None,
+                        });
                     }
                 }
             }
@@ -819,14 +829,10 @@ impl ApplyCtx<'_, '_> {
                         }
                     } else if own.kind.is_teleporter() {
                         // `CMD_DISPATCH` replaces the unit's orders;
-                        // `tick_dispatch_orders` runs it on the
-                        // teleporter's slow updates.
-                        crate::interaction::clear_orders(&mut self.commands.entity(own.e)).insert(
-                            DispatchOrder {
-                                target,
-                                until_empty: *auto,
-                            },
-                        );
+                        // `tick_dispatch_orders` runs it this tick and,
+                        // with Alt, on the teleporter's slow updates.
+                        crate::interaction::clear_orders(&mut self.commands.entity(own.e))
+                            .insert(DispatchOrder::new(target, *auto));
                     }
                 }
             }
@@ -1188,7 +1194,12 @@ impl ApplyCtx<'_, '_> {
                 let Some((target, pos, t_team, t_kind)) = self.live(t) else {
                     return;
                 };
-                if !t_kind.is_teleporter() || self.stunned.contains(target) {
+                // `AllowCommand`: `not GetUnitIsStunned(target)`, whose
+                // first value is "paralysed or being built".
+                if !t_kind.is_teleporter()
+                    || self.stunned.contains(target)
+                    || self.unfinished.contains(target)
+                {
                     return;
                 }
                 // `network_enter.lua`: the Packet's own team's teleporter.
@@ -1418,13 +1429,21 @@ fn command_name(cmd: &SimCommand) -> &'static str {
     }
 }
 
-/// A factory build-option click on one factory (`CFactoryCAI`).
-pub(crate) fn apply_factory_op(producer: &mut Producer, kind: UnitKind, op: FactoryOp) {
+/// A factory build-option click on one factory (`CFactoryCAI`). Returns
+/// the unit on the pad when the click stopped its build
+/// (`CFactory::StopBuild`): the caller removes it.
+#[must_use = "the cancelled buildee has to be removed"]
+pub(crate) fn apply_factory_op(
+    producer: &mut Producer,
+    kind: UnitKind,
+    op: FactoryOp,
+) -> Option<Entity> {
     match op {
         FactoryOp::Add(n) => {
             for _ in 0..n {
                 producer.enqueue(kind);
             }
+            None
         }
         FactoryOp::AddFront(n) => producer.enqueue_front(kind, n as u32),
         FactoryOp::Remove { count, oldest } => producer.remove_kind(kind, count as u32, oldest),

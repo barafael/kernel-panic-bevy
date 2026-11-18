@@ -561,6 +561,13 @@ pub struct OrderState {
 }
 
 impl OrderStateItem<'_, '_> {
+    /// The order is an attack on a ground point, past any NX shot: the
+    /// standing order an NX leaves behind (`specialattack.lua`). Spring
+    /// never ends one by itself.
+    pub fn attacks_ground(&self) -> bool {
+        self.attack_ground && !self.nx_cast
+    }
+
     /// The unit is executing an order.
     pub fn active(&self) -> bool {
         self.move_target
@@ -735,10 +742,14 @@ pub fn advance_command_queue(
 /// tracking a set-target (T) designation out of range (the cache is
 /// dropped then), which must not stop the march
 /// (`CMobileCAI::ExecuteFight` stops only for an enemy it can engage).
+/// Nor does a target in the unit's `NoChaseCategory`
+/// ([`TargetCache::no_chase`]): `ExecuteFight` finds its enemy with
+/// `GetClosestValidTarget`, which skips those, so Bits fighting their way
+/// across the map shoot at a Flow overhead without stopping for it.
 ///
 /// [`AimTarget`]: crate::units::combat::AimTarget
 pub fn fight_engaged(aim_target: bool, cache: Option<&TargetCache>) -> bool {
-    aim_target && cache.is_some_and(|c| c.target.is_some())
+    aim_target && cache.is_some_and(|c| c.target.is_some() && !c.no_chase)
 }
 
 /// A chase path (attack, guard) is stale when there is none yet or its
@@ -764,7 +775,14 @@ pub fn guard_follow_system(
     // A guard chasing an attacker has an attack order of its own; the
     // chase is that system's.
     guards: Query<
-        (Entity, &GlobalTransform, &UnitStats, &GuardTarget),
+        (
+            Entity,
+            &GlobalTransform,
+            &UnitStats,
+            &GuardTarget,
+            &crate::units::components::UnitType,
+            &crate::units::components::TeamId,
+        ),
         (Without<Dying>, Without<AttackTargetOrder>),
     >,
     targets: Query<
@@ -775,10 +793,18 @@ pub fn guard_follow_system(
         ),
         Without<Dying>,
     >,
+    attackers: Query<
+        (
+            &crate::units::components::UnitType,
+            Option<&crate::units::mechanics::cloak::SightedBy>,
+        ),
+        Without<Dying>,
+    >,
+    registry: Res<UnitRegistry>,
     move_path_q: Query<&MovePath>,
     tick: Res<crate::sim::SimTick>,
 ) {
-    for (entity, gtf, stats, guard) in &guards {
+    for (entity, gtf, stats, guard, kind, team) in &guards {
         // Buildings have nobody to trail.
         if stats.speed <= 0.0 {
             continue;
@@ -794,10 +820,24 @@ pub fn guard_follow_system(
 
         // `ExecuteGuard`: whatever hit the guarded unit in the last 40
         // frames is attacked; the guard resumes when it is dealt with.
+        // Only by a guard that could attack it (`canAttack` and
+        // `IsValidTarget`): one with a weapon whose `OnlyTargetCategory`
+        // admits the attacker, outside its `NoChaseCategory`, and in its
+        // team's sight or on its radar (`CWeapon::TestTarget`). A
+        // guarding constructor stays by its ward; Bits don't run after
+        // the Flow that strafed it, or after a Pointer nobody can see.
         if let Some(attacker) = attacker.filter(|a| {
             tick.frame().saturating_sub(a.frame)
                 < crate::units::combat::engage::GUARD_RETALIATION_FRAMES
-                && targets.contains(a.entity)
+                && attackers
+                    .get(a.entity)
+                    .is_ok_and(|(attacker_kind, sighted)| {
+                        let bit = crate::units::mechanics::cloak::team_bit(team.0);
+                        registry.weapon(kind.0).is_some()
+                            && registry.can_attack(kind.0, attacker_kind.0)
+                            && !registry.no_chase(kind.0, attacker_kind.0)
+                            && sighted.is_none_or(|s| (s.los | s.radar) & bit != 0)
+                    })
         }) {
             commands.entity(entity).insert(AttackTargetOrder {
                 target: attacker.entity,
@@ -1861,6 +1901,73 @@ mod tests {
             .id();
         end_leg(&mut world, mover, false);
         assert_eq!(world.get::<MoveTarget>(mover).map(|t| t.0), Some(next));
+    }
+
+    /// `ExecuteGuard` retaliates only with a guard that could attack the
+    /// attacker (`canAttack`, `IsValidTarget`): armed, the attacker in
+    /// its `OnlyTargetCategory` and outside its `NoChaseCategory`, and
+    /// seen or on radar.
+    #[test]
+    fn guards_retaliate_only_against_valid_targets() {
+        use crate::units::combat::engage::LastAttacker;
+        use crate::units::components::{TeamId, UnitType};
+        use crate::units::mechanics::cloak::SightedBy;
+        let registry = UnitRegistry::load();
+        let cases = [
+            (UnitKind::Bit, UnitKind::Bit, true, true),
+            // `NoChaseCategory=VTOL`.
+            (UnitKind::Bit, UnitKind::Flow, true, false),
+            // `CanAttack=0`: a guarding constructor stays put.
+            (UnitKind::Assembler, UnitKind::Bit, true, false),
+            // `OnlyTargetCategory1=UNIT`: a DoS cannot attack a building.
+            (UnitKind::Dos, UnitKind::Socket, true, false),
+            // Neither in sight nor on radar.
+            (UnitKind::Bit, UnitKind::Bit, false, false),
+        ];
+        let mut world = World::new();
+        world.insert_resource(crate::sim::SimTick(100));
+        let mut guards = Vec::new();
+        for (guard_kind, attacker_kind, seen, retaliates) in cases {
+            let attacker = world
+                .spawn((
+                    UnitType(attacker_kind),
+                    TeamId(1),
+                    SightedBy {
+                        los: u64::from(seen),
+                        radar: 0,
+                    },
+                ))
+                .id();
+            let ward = world
+                .spawn((
+                    GlobalTransform::default(),
+                    UnitStats::from_registry(UnitKind::Kernel, &registry, 10.0, 0.0),
+                    LastAttacker {
+                        entity: attacker,
+                        frame: 90,
+                    },
+                ))
+                .id();
+            let guard = world
+                .spawn((
+                    UnitType(guard_kind),
+                    TeamId(0),
+                    GlobalTransform::default(),
+                    UnitStats::from_registry(guard_kind, &registry, 10.0, 0.0),
+                    GuardTarget(ward),
+                ))
+                .id();
+            guards.push((guard, guard_kind, attacker_kind, seen, retaliates));
+        }
+        world.insert_resource(registry);
+        world.run_system_once(guard_follow_system).unwrap();
+        for (guard, guard_kind, attacker_kind, seen, retaliates) in guards {
+            assert_eq!(
+                world.get::<AttackTargetOrder>(guard).is_some(),
+                retaliates,
+                "{guard_kind:?} guarding against {attacker_kind:?} (seen: {seen})"
+            );
+        }
     }
 
     /// Patrol points cycle: promoting one re-queues it at the back.

@@ -22,6 +22,8 @@
 
 use bevy::prelude::*;
 
+use crate::net::NetId;
+use crate::sim::{SimTick, cob_sleep_frames, countdown_secs, slow_update_due};
 use crate::units::ai::AiSeats;
 use crate::units::combat::{AimTarget, DamageQueue, Dying, PendingDamage};
 use crate::units::components::{TeamId, UnitStats, UnitType};
@@ -29,11 +31,12 @@ use crate::units::content::weapons::WeaponKind;
 use crate::units::lifecycle::bookkeeping::{Detector, SeismicDetector};
 use crate::units::mechanics::cloak::Cloaked;
 
-/// Upstream `ResetAim`: `sleep 2000`, then `move head to y-axis [-16]
-/// speed [12]` + `wait-for-move` (16/12 s) before `MAX_SPEED` is
-/// restored and `WANT_CLOAK` set. Seconds after the last aim request
-/// until the worm burrows again.
-pub const RESET_AIM_DELAY: f32 = 2.0 + 16.0 / 12.0;
+/// Upstream `ResetAim`: `sleep 2000` (61 frames), then `move head to
+/// y-axis [-16] speed [12]` + `wait-for-move` (16 elmos at 0.4 a frame:
+/// 40 frames) before `MAX_SPEED` is restored and `WANT_CLOAK` set.
+/// Seconds after the last aim request until the worm wants to burrow
+/// again; the cloak itself waits for its slow update ([`PendingCloak`]).
+pub const RESET_AIM_DELAY: f32 = countdown_secs(cob_sleep_frames(2000) + 40);
 
 /// Upstream `AimWeapon1`: `set MAX_SPEED to maxspeed/2` while surfaced.
 const SURFACED_SPEED_FACTOR: f32 = 0.5;
@@ -125,7 +128,53 @@ pub fn activate_pending_sensors(
     }
 }
 
-/// Cloak the finished units that were waiting for it.
+/// A script changed the unit's `wantCloak` (`set WANT_CLOAK`, `set
+/// CLOAKED`, both only write `wantCloak`: `UnitScript.cpp:1673-1679`) and
+/// the unit's [`Cloaked`] state has yet to follow. The engine switches
+/// `isCloaked` in one place only, `CUnit::SlowUpdateCloak`, on the unit's
+/// slow update (stunned or not; never while it is being built), and
+/// without a Lua `AllowUnitCloak` (Kernel Panic has none) nothing stops
+/// it. So a Worm stays hidden for up to 14 frames after it starts to
+/// surface, and burrows up to 14 frames after its `ResetAim`.
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
+#[component(storage = "SparseSet")]
+pub struct PendingCloak(pub bool);
+
+/// `CUnit::SlowUpdateCloak`: apply each [`PendingCloak`] on its unit's
+/// slow update.
+#[allow(clippy::type_complexity)]
+pub fn apply_pending_cloak(
+    tick: Res<SimTick>,
+    units: Query<
+        (Entity, &NetId, &PendingCloak, Has<Cloaked>),
+        (
+            Without<crate::units::lifecycle::spawning::Emerging>,
+            Without<Dying>,
+        ),
+    >,
+    mut commands: Commands,
+) {
+    let frame = tick.frame();
+    for (entity, id, pending, cloaked) in &units {
+        if !slow_update_due(frame, id.0) {
+            continue;
+        }
+        let mut unit = commands.entity(entity);
+        unit.remove::<PendingCloak>();
+        match (pending.0, cloaked) {
+            (true, false) => {
+                unit.insert(Cloaked);
+            }
+            (false, true) => {
+                unit.remove::<Cloaked>();
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Set the finished units that were waiting for it to want their cloak
+/// (it comes on at their next slow update, [`PendingCloak`]).
 #[allow(clippy::type_complexity)]
 pub fn promote_cloak_when_built(
     time: Res<Time>,
@@ -145,7 +194,7 @@ pub fn promote_cloak_when_built(
             commands
                 .entity(entity)
                 .remove::<CloakWhenBuilt>()
-                .try_insert(Cloaked);
+                .try_insert(PendingCloak(true));
         }
     }
 }
@@ -175,10 +224,12 @@ pub fn init_autohold(
 
 /// Surface / burrow state machine. An aim request ([`AimTarget`], stamped
 /// by `combat_system` / `attack_ground_system` once a target is picked)
-/// is the port's `AimWeapon1`: decloak, halve the speed, and (re)arm the
-/// reset countdown. With no aim request for [`RESET_AIM_DELAY`] the worm
-/// restores its speed and re-cloaks (`ResetAim`). The head choreography
-/// runs in the worm animation driver off the same aim calls.
+/// is the port's `AimWeapon1`: give up the cloak (`CLOAKED=FALSE`, which
+/// takes effect on the slow update, [`PendingCloak`]), lift the hold
+/// fire, halve the speed, and (re)arm the reset countdown. With no aim
+/// request for [`RESET_AIM_DELAY`] the worm restores its speed and wants
+/// its cloak back (`ResetAim`). The head choreography runs in the worm
+/// animation driver off the same aim calls.
 #[allow(clippy::type_complexity)]
 pub fn tick_worm_surfacing(
     time: Res<Time>,
@@ -190,6 +241,7 @@ pub fn tick_worm_surfacing(
             Option<&mut Surfaced>,
             Has<AimTarget>,
             Has<Cloaked>,
+            Option<&PendingCloak>,
         ),
         // The Hole carries the toggle for its Worms' sake, not a cycle.
         (
@@ -200,12 +252,14 @@ pub fn tick_worm_surfacing(
     >,
 ) {
     let dt = time.delta_secs();
-    for (entity, mut stats, surfaced, aiming, cloaked) in &mut worms {
+    for (entity, mut stats, surfaced, aiming, cloaked, pending) in &mut worms {
+        // `set CLOAKED to FALSE; set WANT_CLOAK to FALSE`.
+        let uncloak = cloaked || pending.is_some_and(|p| p.0);
         match (surfaced, aiming) {
             (Some(mut s), true) => {
                 s.reset_in = RESET_AIM_DELAY;
-                if cloaked {
-                    commands.entity(entity).remove::<Cloaked>();
+                if uncloak {
+                    commands.entity(entity).insert(PendingCloak(false));
                 }
             }
             (None, true) => {
@@ -216,15 +270,18 @@ pub fn tick_worm_surfacing(
                     reset_in: RESET_AIM_DELAY,
                     base_speed,
                 });
-                if cloaked {
-                    e.remove::<Cloaked>();
+                if uncloak {
+                    e.insert(PendingCloak(false));
                 }
             }
             (Some(mut s), false) => {
                 s.reset_in -= dt;
                 if s.reset_in <= 0.0 {
                     stats.speed = s.base_speed;
-                    commands.entity(entity).remove::<Surfaced>().insert(Cloaked);
+                    commands
+                        .entity(entity)
+                        .remove::<Surfaced>()
+                        .insert(PendingCloak(true));
                 }
             }
             (None, false) => {}
@@ -302,6 +359,32 @@ mod tests {
         assert_eq!(AutoHold::initial(true), AutoHold(false));
     }
 
+    /// `CUnit::SlowUpdateCloak`: a wanted cloak (or uncloak) waits for
+    /// the unit's slow update, `(frame + id) % 15 == 0`.
+    #[test]
+    fn a_cloak_change_waits_for_the_slow_update() {
+        let mut world = World::new();
+        let worm = world.spawn((NetId(4), PendingCloak(true))).id();
+        let system = world.register_system(apply_pending_cloak);
+        for frame in 1..=10 {
+            world.insert_resource(SimTick(frame));
+            world.run_system(system).unwrap();
+            assert!(world.get::<Cloaked>(worm).is_none(), "frame {frame}");
+        }
+        world.insert_resource(SimTick(11));
+        world.run_system(system).unwrap();
+        assert!(world.get::<Cloaked>(worm).is_some());
+        assert!(world.get::<PendingCloak>(worm).is_none());
+
+        world.entity_mut(worm).insert(PendingCloak(false));
+        world.insert_resource(SimTick(20));
+        world.run_system(system).unwrap();
+        assert!(world.get::<Cloaked>(worm).is_some());
+        world.insert_resource(SimTick(26));
+        world.run_system(system).unwrap();
+        assert!(world.get::<Cloaked>(worm).is_none());
+    }
+
     /// AimWeapon1 decloaks + halves speed; ResetAim restores both once
     /// the aim requests stop for `RESET_AIM_DELAY`.
     #[test]
@@ -324,7 +407,12 @@ mod tests {
         app.world_mut()
             .run_system_once(tick_worm_surfacing)
             .unwrap();
-        assert!(app.world().get::<Cloaked>(worm).is_none());
+        // Still hidden: the cloak goes on its slow update.
+        assert!(app.world().get::<Cloaked>(worm).is_some());
+        assert_eq!(
+            app.world().get::<PendingCloak>(worm),
+            Some(&PendingCloak(false))
+        );
         assert!(app.world().get::<Surfaced>(worm).is_some());
         assert!((app.world().get::<UnitStats>(worm).unwrap().speed - 31.5).abs() < 1e-4);
 
@@ -334,7 +422,10 @@ mod tests {
         app.world_mut()
             .run_system_once(tick_worm_surfacing)
             .unwrap();
-        assert!(app.world().get::<Cloaked>(worm).is_some());
+        assert_eq!(
+            app.world().get::<PendingCloak>(worm),
+            Some(&PendingCloak(true))
+        );
         assert!(app.world().get::<Surfaced>(worm).is_none());
         assert!((app.world().get::<UnitStats>(worm).unwrap().speed - 63.0).abs() < 1e-4);
     }

@@ -52,6 +52,49 @@ use crate::units::teams::{Alliances, TeamFates};
 #[derive(Resource, Debug, Clone, Copy, Default)]
 pub struct FogEnabled(pub bool);
 
+/// The local player's line of sight at a point, by the rule
+/// [`update_fog_visibility`] applies to units: a finished, live unit of
+/// an allied owner within its sight distance. Everything is in sight
+/// with the fog off (a spectator: `GetSpectatingState`'s full view), or
+/// in a bare world without the fog's resources.
+#[allow(clippy::type_complexity)]
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct LocalSight<'w, 's> {
+    fog: Option<Res<'w, FogEnabled>>,
+    player: Option<Res<'w, LocalTeam>>,
+    alliances: Option<Res<'w, Alliances>>,
+    registry: Option<Res<'w, UnitRegistry>>,
+    viewers: Query<
+        'w,
+        's,
+        (&'static TeamId, &'static UnitType, &'static GlobalTransform),
+        (
+            Without<Dying>,
+            Without<crate::units::lifecycle::spawning::Emerging>,
+        ),
+    >,
+}
+
+impl LocalSight<'_, '_> {
+    /// `Spring.GetPositionLosState(pos, allyTeam)`'s in-LOS answer.
+    pub fn sees(&self, pos: Vec3) -> bool {
+        let (Some(fog), Some(player), Some(alliances), Some(registry)) = (
+            self.fog.as_deref(),
+            self.player.as_deref(),
+            self.alliances.as_deref(),
+            self.registry.as_deref(),
+        ) else {
+            return true;
+        };
+        !fog.0
+            || self.viewers.iter().any(|(team, kind, gtf)| {
+                let sight = registry.sight_distance(kind.0);
+                alliances.friendly(team.0, player.0)
+                    && gtf.translation().distance_squared(pos) <= sight * sight
+            })
+    }
+}
+
 /// Whether the local player sees through line of sight: seated and
 /// still in play. A spectator, a replay's viewer, the attract demo and a
 /// defeated or resigned owner see everything (`CPlayer::StartSpectating`
