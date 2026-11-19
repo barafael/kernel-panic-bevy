@@ -286,9 +286,17 @@ pub fn death_system(
             Option<&Infected>,
             Has<BuildDriven>,
             &crate::net::NetId,
+            Option<&crate::units::components::TeamId>,
         ),
         (Without<Dying>, Changed<Health>),
     >,
+    // `taken_the_lead.lua`: who killed what (bare test worlds: none).
+    mut kill_credit: (
+        Option<ResMut<super::LethalHits>>,
+        Option<ResMut<super::KillTally>>,
+        Option<ResMut<Messages<super::LeadTaken>>>,
+        Option<Res<crate::units::teams::Alliances>>,
+    ),
     mut animators: Query<&mut UnitAnimator>,
     mut virus_spawns: ResMut<VirusSpawnQueue>,
     mut damage_queue: ResMut<DamageQueue>,
@@ -307,9 +315,28 @@ pub fn death_system(
     // left it standing at 0 HP.
     let mut changed: Vec<_> = query.iter().collect();
     changed.sort_unstable_by_key(|item| *item.7);
-    for (entity, unit, health, (faction, color), gtf, infected, being_built, _) in changed {
+    let (lethal, tally, leads, alliances) = &mut kill_credit;
+    for (entity, unit, health, (faction, color), gtf, infected, being_built, _, team) in changed {
         let color = color.map_or(TeamColor::of_faction(*faction), |c| c.0);
         if health.current <= 0.0 {
+            // taken_the_lead.lua `UnitDestroyed`: a finished unit
+            // (`isUnitComplete`) killed by another unit (`u ~= a`) of a
+            // team not allied with its own.
+            if !being_built
+                && let Some(team) = team
+                && let Some(Some(killer)) = lethal.as_deref_mut().and_then(|l| l.0.remove(&entity))
+                && killer.entity != entity
+                && !alliances
+                    .as_deref()
+                    .map_or(killer.team == team.0, |a| a.friendly(killer.team, team.0))
+                && let Some(kills) = tally.as_deref_mut().and_then(|t| t.record(killer.team))
+                && let Some(leads) = leads.as_deref_mut()
+            {
+                leads.write(super::LeadTaken {
+                    team: killer.team,
+                    kills,
+                });
+            }
             // If the dying unit was infected, queue a Virus spawn for the
             // attacker's team at the death location (infection.lua's
             // `UnitDestroyed` fires for nanoframes too).
@@ -420,6 +447,10 @@ pub fn death_system(
                     timer: DEATH_ANIM_TIMEOUT,
                 });
         }
+    }
+    // What is left was no kill to count (a nanoframe's death).
+    if let Some(lethal) = lethal.as_deref_mut() {
+        lethal.0.clear();
     }
 }
 
@@ -834,6 +865,73 @@ mod tests {
         assert!(world.get::<Dying>(frame).is_some());
         world.run_system_once(cleanup_dying).unwrap();
         assert!(world.get_entity(frame).is_err(), "gone at once");
+    }
+
+    /// taken_the_lead.lua `UnitDestroyed`: a finished unit killed by an
+    /// enemy unit counts for the killer's team; a nanoframe, a unit
+    /// killed by its own team or by nobody does not. The first count
+    /// past the best takes the lead, once per change of leader.
+    #[test]
+    fn kills_are_credited_to_the_killers_team() {
+        let mut world = resolve_world(UnitRegistry::load(), WeaponRegistry::load());
+        world.init_resource::<super::super::LethalHits>();
+        world.init_resource::<super::super::KillTally>();
+        world.init_resource::<Messages<super::super::LeadTaken>>();
+        world.init_resource::<Alliances>();
+        let unit = |world: &mut World, team: u8, built: bool| {
+            let mut e = world.spawn((
+                UnitType(UnitKind::Bit),
+                Faction::System,
+                TeamId(team),
+                GlobalTransform::default(),
+                Health::full(100.0),
+            ));
+            if !built {
+                e.insert(BuildDriven::default());
+            }
+            e.id()
+        };
+        let killer = unit(&mut world, 1, true);
+        let ally_killer = unit(&mut world, 0, true);
+        let by = |entity, team| {
+            Some(super::super::Attacker {
+                entity,
+                team,
+                faction: Faction::System,
+            })
+        };
+        let victims = [
+            (unit(&mut world, 0, true), by(killer, 1)),
+            (unit(&mut world, 0, true), by(killer, 1)),
+            (unit(&mut world, 0, false), by(killer, 1)),
+            (unit(&mut world, 0, true), by(ally_killer, 0)),
+            (unit(&mut world, 0, true), None),
+        ];
+        for (victim, attacker) in victims {
+            world.get_mut::<Health>(victim).unwrap().current = 0.0;
+            world
+                .resource_mut::<super::super::LethalHits>()
+                .0
+                .insert(victim, attacker);
+        }
+        world.run_system_once(death_system).unwrap();
+        let leads: Vec<_> = world
+            .resource_mut::<Messages<super::super::LeadTaken>>()
+            .drain()
+            .collect();
+        assert_eq!(
+            leads,
+            [super::super::LeadTaken { team: 1, kills: 1 }],
+            "the lead, once"
+        );
+        assert!(world.resource::<super::super::LethalHits>().0.is_empty());
+        // Two kills each way: team 0 passes team 1's two on its third.
+        let mut tally = super::super::KillTally::default();
+        assert_eq!(tally.record(1), Some(1));
+        assert_eq!(tally.record(1), None);
+        assert_eq!(tally.record(0), None);
+        assert_eq!(tally.record(0), None, "level is not ahead");
+        assert_eq!(tally.record(0), Some(3));
     }
 
     fn healer(world: &mut World, hp: f32, rested: f32) -> Entity {

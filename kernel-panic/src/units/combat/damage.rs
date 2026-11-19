@@ -225,6 +225,50 @@ impl VirusSpawn {
 #[derive(Resource, Default)]
 pub struct VirusSpawnQueue(Vec<VirusSpawn>);
 
+/// The hits that killed this frame: victim → the unit that dealt the
+/// lethal blow (`CUnit::DoDamage` → `KillUnit(attacker)`), `None` with
+/// no attacker unit. Spring hands `UnitDestroyed` the attacker as long
+/// as the unit exists — dying (a death blast's owner) or not — and none
+/// once it is gone. Drained by `death_system`.
+#[derive(Resource, Default)]
+pub struct LethalHits(pub bevy::ecs::entity::EntityHashMap<Option<Attacker>>);
+
+/// `taken_the_lead.lua`: kills per team and the team in the lead. A
+/// kill counts when a finished unit is killed by another unit of a team
+/// not allied with its own; a team that passes the best count and was
+/// not already leading takes the lead ([`LeadTaken`]).
+#[derive(Resource, Default, Debug)]
+pub struct KillTally {
+    kills: std::collections::BTreeMap<u8, u32>,
+    best: u32,
+    leader: Option<u8>,
+}
+
+impl KillTally {
+    /// Count a kill for `team`; `Some(kills)` when it takes the lead.
+    pub fn record(&mut self, team: u8) -> Option<u32> {
+        let kills = self.kills.entry(team).or_default();
+        *kills += 1;
+        if *kills <= self.best {
+            return None;
+        }
+        self.best = *kills;
+        if self.leader == Some(team) {
+            return None;
+        }
+        self.leader = Some(team);
+        Some(self.best)
+    }
+}
+
+/// A team has taken the lead in kills (`taken_the_lead.lua`'s
+/// `Spring.SendMessage`); the HUD prints it.
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LeadTaken {
+    pub team: u8,
+    pub kills: u32,
+}
+
 impl VirusSpawnQueue {
     pub fn push(&mut self, spawn: VirusSpawn) {
         self.0.push(spawn);
@@ -445,6 +489,7 @@ pub struct DamageResolver<'w, 's> {
     impulses: ResMut<'w, crate::interaction::ground_move::PendingImpulses>,
     damage_log: Option<ResMut<'w, crate::units::ai::TeamDamageLog>>,
     alliances: Option<Res<'w, crate::units::teams::Alliances>>,
+    lethal: Option<ResMut<'w, LethalHits>>,
     commands: Commands<'w, 's>,
 }
 
@@ -584,7 +629,17 @@ impl DamageResolver<'_, '_> {
                     }
                 }
             } else if let Ok(mut health) = self.hits.health.get_mut(hit.target) {
+                let was = health.current;
                 health.current -= damage;
+                // The lethal hit: remember who dealt it, while that unit
+                // still exists.
+                if was > 0.0
+                    && health.current <= 0.0
+                    && let Some(lethal) = self.lethal.as_deref_mut()
+                {
+                    let killer = hit.attacker.filter(|a| self.hits.victim.contains(a.entity));
+                    lethal.0.insert(hit.target, killer);
+                }
             }
         }
         if hit.impulse != Vec3::ZERO {

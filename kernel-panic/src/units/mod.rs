@@ -102,6 +102,9 @@ impl Plugin for UnitsPlugin {
             .init_match_resource::<combat::DelayedDamage>()
             .init_match_resource::<crate::interaction::ground_move::PendingImpulses>()
             .init_match_resource::<combat::VirusSpawnQueue>()
+            .init_match_resource::<combat::LethalHits>()
+            .init_match_resource::<combat::KillTally>()
+            .add_message::<combat::LeadTaken>()
             .init_match_resource::<command_fire::MineSpawnQueue>()
             .init_match_resource::<SimRng<command_fire::MineLaunchRng>>()
             .init_match_resource::<network_buffer::PacketBuffer>()
@@ -131,6 +134,7 @@ impl Plugin for UnitsPlugin {
             .add_observer(production::kill_orphaned_buildee)
             .add_observer(mechanics::ghost::leave_dead_ghost)
             .add_plugins(weapon_fx::WeaponFxPlugin)
+            .add_plugins(crate::units::assets::unit_overlay::UnitOverlayPlugin)
             // Everything the fixed sim moves is drawn interpolated
             // between the last two sim poses (`rendering::interpolation`).
             .register_required_components::<components::UnitType, SimPose>()
@@ -259,6 +263,7 @@ impl Plugin for UnitsPlugin {
                                 // `SlowUpdateCloak`, before the cloak
                                 // is read this tick.
                                 worm::apply_pending_cloak,
+                                worm::tick_worm_fire_state,
                                 worm::activate_pending_sensors,
                             ),
                             cloak::update_cloak_detection,

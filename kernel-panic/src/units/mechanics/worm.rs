@@ -57,6 +57,86 @@ impl AutoHold {
     }
 }
 
+/// worm.bos's fire state: `STANDINGFIREORDERS` 0 (hold fire) or 2
+/// (fire at will), as the script sets it. Three places write it:
+///
+/// - `AutoHold(state)` (autohold.lua, on every toggle): hold iff the
+///   toggle is on and the Worm is cloaked, at once;
+/// - `AimWeapon1`: fire at will, at once, with the toggle on;
+/// - `Create()`'s loop, which samples `CLOAKED` every `sleep 300` (10
+///   frames) from the moment it sets `WANT_CLOAK`, and only when the
+///   sample differs from the last one sets hold to match (toggle on).
+///
+/// So a Worm whose cloak comes on holds fire up to 10 frames later.
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WormFireState {
+    /// `STANDINGFIREORDERS == 0`.
+    pub hold: bool,
+    /// The loop's `cloak` variable: `CLOAKED` at its last sample.
+    seen_cloaked: bool,
+    /// The toggle as the script last heard it (`AutoHold(state)`).
+    autohold: bool,
+    /// The loop's next sample; `None` until `Create()` reaches it.
+    next_poll: Option<u64>,
+}
+
+impl WormFireState {
+    /// A new Worm: AutoHold(state) runs at creation, uncloaked: fire at
+    /// will.
+    pub fn new(autohold: bool) -> Self {
+        Self {
+            autohold,
+            ..Self::default()
+        }
+    }
+
+    /// A Worm whose script has caught up with its toggle and cloak.
+    #[cfg(test)]
+    pub fn settled(autohold: bool, cloaked: bool) -> Self {
+        Self {
+            hold: autohold && cloaked,
+            seen_cloaked: cloaked,
+            autohold,
+            next_poll: None,
+        }
+    }
+
+    /// `AimWeapon1`: `if(autoholdstate) set STANDINGFIREORDERS to 2`.
+    fn aim(&mut self) {
+        if self.autohold {
+            self.hold = false;
+        }
+    }
+}
+
+/// worm.bos `Create()` loop period: `sleep 300`.
+const FIRE_STATE_POLL: u64 = cob_sleep_frames(300) as u64;
+
+/// Run the script side of [`WormFireState`]: an AutoHold toggle the
+/// script hasn't heard yet (`AutoHold(state)`) and the `Create()` loop's
+/// `CLOAKED` samples.
+pub fn tick_worm_fire_state(
+    tick: Res<SimTick>,
+    mut worms: Query<(&mut WormFireState, &AutoHold, Has<Cloaked>), Without<Dying>>,
+) {
+    let frame = tick.frame();
+    for (mut state, autohold, cloaked) in &mut worms {
+        if state.autohold != autohold.0 {
+            state.autohold = autohold.0;
+            state.hold = autohold.0 && cloaked;
+        }
+        if state.next_poll.is_some_and(|at| at <= frame) {
+            state.next_poll = Some(frame + FIRE_STATE_POLL);
+            if state.seen_cloaked != cloaked {
+                state.seen_cloaked = cloaked;
+                if state.autohold {
+                    state.hold = cloaked;
+                }
+            }
+        }
+    }
+}
+
 /// Present while a Worm is surfaced (decloaked by an aim request).
 /// `base_speed` is the pre-surface `MAX_SPEED` restored on burrow.
 #[derive(Component, Clone, Copy, Debug)]
@@ -178,8 +258,9 @@ pub fn apply_pending_cloak(
 #[allow(clippy::type_complexity)]
 pub fn promote_cloak_when_built(
     time: Res<Time>,
+    tick: Res<SimTick>,
     mut waiting: Query<
-        (Entity, &mut CloakWhenBuilt),
+        (Entity, &mut CloakWhenBuilt, Option<&mut WormFireState>),
         (
             Without<crate::units::lifecycle::spawning::Emerging>,
             Without<Dying>,
@@ -188,9 +269,14 @@ pub fn promote_cloak_when_built(
     mut commands: Commands,
 ) {
     let dt = time.delta_secs();
-    for (entity, mut wait) in &mut waiting {
+    for (entity, mut wait, fire_state) in &mut waiting {
         wait.delay -= dt;
         if wait.delay <= 0.0 {
+            // worm.bos `Create()` enters its `CLOAKED` loop here, with
+            // `cloak` sampled uncloaked; its first look is at once.
+            if let Some(mut fire_state) = fire_state {
+                fire_state.next_poll = Some(tick.frame());
+            }
             commands
                 .entity(entity)
                 .remove::<CloakWhenBuilt>()
@@ -205,19 +291,29 @@ pub fn promote_cloak_when_built(
 pub struct WormSplash(pub WeaponKind);
 
 /// Give freshly spawned AutoHold-capable units their initial toggle
-/// state from their team (human vs AI).
+/// state from their team (human vs AI) — unless their factory already
+/// passed its own on (a Hole's Worms take the Hole's) — and a Worm its
+/// script's fire state, which starts from that toggle.
 // Three components + one filter on the fresh-spawn pass.
 #[allow(clippy::type_complexity)]
 pub fn init_autohold(
     mut commands: Commands,
     ai_seats: Res<AiSeats>,
-    new_units: Query<(Entity, &UnitType, &TeamId), (Added<UnitType>, Without<AutoHold>)>,
+    new_units: Query<(Entity, &UnitType, &TeamId, Option<&AutoHold>), Added<UnitType>>,
 ) {
-    for (entity, unit_type, team) in &new_units {
-        if unit_type.0.has_autohold() {
-            commands
-                .entity(entity)
-                .insert(AutoHold::initial(ai_seats.contains(team.0)));
+    for (entity, unit_type, team, inherited) in &new_units {
+        if !unit_type.0.has_autohold() {
+            continue;
+        }
+        let autohold = inherited
+            .copied()
+            .unwrap_or_else(|| AutoHold::initial(ai_seats.contains(team.0)));
+        let mut unit = commands.entity(entity);
+        if inherited.is_none() {
+            unit.insert(autohold);
+        }
+        if unit_type.0 == crate::units::content::definitions::UnitKind::Worm {
+            unit.insert(WormFireState::new(autohold.0));
         }
     }
 }
@@ -242,6 +338,7 @@ pub fn tick_worm_surfacing(
             Has<AimTarget>,
             Has<Cloaked>,
             Option<&PendingCloak>,
+            Option<&mut WormFireState>,
         ),
         // The Hole carries the toggle for its Worms' sake, not a cycle.
         (
@@ -252,7 +349,10 @@ pub fn tick_worm_surfacing(
     >,
 ) {
     let dt = time.delta_secs();
-    for (entity, mut stats, surfaced, aiming, cloaked, pending) in &mut worms {
+    for (entity, mut stats, surfaced, aiming, cloaked, pending, fire_state) in &mut worms {
+        if aiming && let Some(mut fire_state) = fire_state {
+            fire_state.aim();
+        }
         // `set CLOAKED to FALSE; set WANT_CLOAK to FALSE`.
         let uncloak = cloaked || pending.is_some_and(|p| p.0);
         match (surfaced, aiming) {
@@ -357,6 +457,38 @@ mod tests {
     fn autohold_defaults_on_for_human_off_for_ai() {
         assert_eq!(AutoHold::initial(false), AutoHold(true));
         assert_eq!(AutoHold::initial(true), AutoHold(false));
+    }
+
+    /// worm.bos: hold fire follows `CLOAKED` only at the `Create()`
+    /// loop's samples, 10 frames apart; `AutoHold(state)` and
+    /// `AimWeapon1` act at once.
+    #[test]
+    fn the_hold_fire_follows_the_scripts_samples() {
+        let mut world = World::new();
+        let mut state = WormFireState::new(true);
+        state.next_poll = Some(5);
+        let worm = world.spawn((state, AutoHold(true), Cloaked)).id();
+        let system = world.register_system(tick_worm_fire_state);
+        let hold = |world: &mut World, frame| {
+            world.insert_resource(SimTick(frame));
+            world.run_system(system).unwrap();
+            world.get::<WormFireState>(worm).unwrap().hold
+        };
+        assert!(!hold(&mut world, 4), "cloaked, but no sample yet");
+        assert!(hold(&mut world, 5));
+        // Off and on again: `AutoHold(state)` sets it at once.
+        world.entity_mut(worm).insert(AutoHold(false));
+        assert!(!hold(&mut world, 6));
+        world.entity_mut(worm).insert(AutoHold(true));
+        assert!(hold(&mut world, 7));
+        // Surfacing: `AimWeapon1` lifts it; the decloak is seen at the
+        // next sample, frame 15, and the re-cloak at the one after it.
+        world.get_mut::<WormFireState>(worm).unwrap().aim();
+        world.entity_mut(worm).remove::<Cloaked>();
+        assert!(!hold(&mut world, 15));
+        world.entity_mut(worm).insert(Cloaked);
+        assert!(!hold(&mut world, 24));
+        assert!(hold(&mut world, 25));
     }
 
     /// `CUnit::SlowUpdateCloak`: a wanted cloak (or uncloak) waits for

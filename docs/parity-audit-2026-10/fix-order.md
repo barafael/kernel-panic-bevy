@@ -154,21 +154,27 @@ Checked and not gaps:
 - Lightning arcs are drawn only with an end in the player's sight, with
   the gadget's 12-vertex strip (overshoot and dip) and half-width 4.
 
-## Still open (observed in-parities)
+## Seventh pass (SIM_VERSION 29)
 
-- `taken_the_lead.lua`: no kill attribution, no "has taken the lead with
-  N kills!" announcement.
-- Firewall protection overlay (`network_reflectorshield.lua` DrawWorld:
-  green additive scrolling `shieldEffect.png` on protected units).
-- Network build overlay (`network_build.lua`: `network_buildeffect.tga`
-  sweep on Gateway/Carrier buildees).
-- Firewall recharge/protection and Terminal recharge end on the gadgets'
-  16-frame grid (`(f+3)%16`), 0-15 frames later than the port's timers.
-- worm.bos sets hold fire from a `sleep 300` poll of `CLOAKED`: up to 10
-  frames of fire-at-will after the cloak comes on.
-- Deliberate: Mine Launch needs 6100 HP (upstream 6000) and is refused at
-  the Logic Bomb cap (upstream pays and reloads for nothing).
-- Single-player autosave (`spawn_units.lua`) is not ported.
+- Mine Launch as byte.bos has it: at exactly 6000 HP (the cost kills
+  the Byte) and at the Logic Bomb cap (6000 HP and the reload, no tube
+  fires).
+- The Firewall's and Terminal's recharges and the protection end on the
+  gadgets' 16-frame grid (`(f+3)%16`, `f%16`).
+- A Worm's hold fire is script state (`WormFireState`): `AutoHold(state)`
+  and `AimWeapon1` set it at once, the `Create()` loop's 10-frame
+  `CLOAKED` poll the rest.
+- `taken_the_lead.lua`: the lethal hit's attacker is credited
+  (`LethalHits`, `KillTally`) and "TeamN <names>'s <side> has taken the
+  lead with K kills!" goes to the console.
+- The Firewall's green glow and the Network build cover are drawn
+  (`units::assets::unit_overlay`: object-linear texgen per piece). The
+  build cover was seen running; the glow is unit-tested only (the bot's
+  spawn cheat does not keep a Firewall).
+- Factory products record their factory as `soloBuilder`
+  (`CFactory::StartBuild`).
+
+## Still open (observed in-parities)
 
 - The morph's alpha dissolve is not drawn.
 - Unlit unit/terrain materials (no sun/ambient, Bevy tonemapping): a look
@@ -177,3 +183,5 @@ Checked and not gaps:
   of the remake's slack ladder).
 - The Signal's flight constants follow the engine source but were not
   compared with the original's flight time (needs the original running).
+- Single-player autosave (`spawn_units.lua`) is not ported: the port has
+  no save / load.

@@ -89,24 +89,18 @@ fn holds_position(kind: UnitKind) -> bool {
 /// (`CMobileCAI::SlowUpdate`'s `fireState >= FIREATWILL`) nor diverts
 /// a Fight.
 mod holds_fire {
-    use crate::units::mechanics::cloak::Cloaked;
-    use crate::units::mechanics::worm::{AutoHold, Surfaced};
+    use crate::units::mechanics::worm::WormFireState;
     use bevy::ecs::query::QueryData;
-    use bevy::prelude::*;
 
     #[derive(QueryData)]
     pub struct HoldFire {
-        autohold: Option<&'static AutoHold>,
-        cloaked: Has<Cloaked>,
-        surfaced: Has<Surfaced>,
+        state: Option<&'static WormFireState>,
     }
 
     impl HoldFireItem<'_, '_> {
-        /// worm.bos: AutoHold on and cloaked — but `AimWeapon1` sets
-        /// fire at will at once, while the cloak lasts to the slow
-        /// update.
+        /// worm.bos `STANDINGFIREORDERS 0` ([`WormFireState`]).
         pub fn holds(&self) -> bool {
-            self.cloaked && !self.surfaced && self.autohold.is_some_and(|a| a.0)
+            self.state.is_some_and(|s| s.hold)
         }
     }
 }
@@ -456,7 +450,7 @@ mod tests {
     #[test]
     fn a_worm_holding_fire_does_not_engage() {
         use crate::units::mechanics::cloak::Cloaked;
-        use crate::units::mechanics::worm::AutoHold;
+        use crate::units::mechanics::worm::{AutoHold, WormFireState};
         let weapons = WeaponRegistry::load();
         let registry = UnitRegistry::load();
         let reach = weapons
@@ -470,7 +464,10 @@ mod tests {
             (true, false, true),
         ] {
             let (mut rig, unit, _) = rig(UnitKind::Worm, gap);
-            rig.world.entity_mut(unit).insert(AutoHold(autohold));
+            rig.world.entity_mut(unit).insert((
+                AutoHold(autohold),
+                WormFireState::settled(autohold, cloaked),
+            ));
             if cloaked {
                 rig.world.entity_mut(unit).insert(Cloaked);
             }

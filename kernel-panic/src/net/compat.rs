@@ -168,12 +168,17 @@ use super::state::Fnv;
 /// waits out the reload; a Firewall's cast during the recharge waits for
 /// it; a deploy order clears the unit's orders; a mine bolt whose Byte
 /// has died leaves no mine.
+/// 29 (2026-11-18, the remaining gaps): Mine Launch at exactly 6000 HP
+/// and at the Logic Bomb cap (pays and reloads, fires nothing); the
+/// Firewall's and Terminal's recharges and the protection end on the
+/// gadgets' 16-frame grid; a Worm's hold fire follows worm.bos's 10-frame
+/// `CLOAKED` poll; kills are tallied for `taken_the_lead.lua`.
 ///
 /// [`SimCommand::Dropped`]: crate::net::SimCommand::Dropped
 /// [`SimCommand::Returned`]: crate::net::SimCommand::Returned
 /// [`SimCommand::InternalSpeed`]: crate::net::SimCommand::InternalSpeed
 /// [`MatchRules`]: crate::net::MatchRules
-pub const SIM_VERSION: u32 = 28;
+pub const SIM_VERSION: u32 = 29;
 
 /// The map-independent half of [`Compat`]: what a peer announces when
 /// it joins a room, before any map is chosen.

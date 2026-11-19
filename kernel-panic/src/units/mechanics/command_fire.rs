@@ -190,8 +190,30 @@ impl SigTermVisuals<'_> {
 /// `reload * 32` sim frames — at Spring's 30 Hz that is 96 s of game
 /// time (their button label counts down 32-frame "seconds" from 90).
 /// Both also start the recharge in `UnitCreated`, so a fresh Terminal /
-/// Firewall is not ready either (see [`initial_cooldown`]).
-pub const LUA_ABILITY_RELOAD: f32 = 90.0 * 32.0 / 30.0;
+/// Firewall is not ready either (see [`initial_cooldown`]). Counted
+/// down to run out on its 2880th frame exactly ([`countdown_secs`]); the
+/// gadgets then clear it on their 16-frame grid ([`lua_grid_frame`]).
+///
+/// [`countdown_secs`]: crate::sim::countdown_secs
+pub const LUA_ABILITY_RELOAD: f32 = crate::sim::countdown_secs(90 * 32);
+
+/// The frames on which the Lua abilities' timers are looked at:
+/// `network_reflectorshield.lua` (`(time + 3) % 16 == 0`) for the
+/// Firewall's recharge and every protection, `airstrike.lua` (`time % 16
+/// == 0`) for the Terminal's recharge. A timer that ran out ends on the
+/// first such frame — up to 15 frames late. Other kinds: every frame.
+pub fn lua_grid_frame(kind: UnitKind, frame: u64) -> bool {
+    match kind {
+        UnitKind::Firewall => firewall_grid_frame(frame),
+        UnitKind::Terminal => frame.is_multiple_of(16),
+        _ => true,
+    }
+}
+
+/// `network_reflectorshield.lua`'s `(time + 3) % 16 == 0`.
+pub fn firewall_grid_frame(frame: u64) -> bool {
+    (frame + 3).is_multiple_of(16)
+}
 
 /// Firewall protection zone: all allies within `FIREWALL_RADIUS` at
 /// cast time gain a `Protected` component for `FIREWALL_DURATION`.
@@ -204,7 +226,7 @@ pub const FIREWALL_RADIUS: f32 = 300.0;
 /// `protected[u] = GetGameFrame() + protectionTime * 32` with
 /// `protectionTime = 20`: 640 sim frames, 21.33 s at 30 Hz (the same
 /// 32-per-second counting as [`LUA_ABILITY_RELOAD`]).
-pub const FIREWALL_DURATION: f32 = 20.0 * 32.0 / 30.0;
+pub const FIREWALL_DURATION: f32 = crate::sim::countdown_secs(20 * 32);
 pub const FIREWALL_COOLDOWN: f32 = LUA_ABILITY_RELOAD;
 /// Fraction of incoming non-paralyzer damage that a Protected unit
 /// *takes* (`network_reflectorshield.lua` `UnitPreDamaged`: `damage*0.5`).
@@ -226,10 +248,6 @@ pub const MINELAUNCHER_COOLDOWN: f32 = 10.0;
 /// hit credited to the SIGTERM bomb, so the Firewall halves it and the
 /// closed Byte's 30% rule does not.
 pub const MINELAUNCHER_HP_COST: f32 = 6000.0;
-/// Below this remaining HP the Byte refuses to cast so a mis-click
-/// can't instantly end it. Upstream lets the Byte suicide-cast; we
-/// keep a small buffer for ergonomics.
-pub const MINELAUNCHER_HP_FLOOR: f32 = 100.0;
 /// byte.bos `LaunchMines`: `emit-sfx 2049` (weapon 2, the MineLauncher)
 /// from these pieces, in this order, while Logic Bombs are left under
 /// the cap. `Create()` points them 30° down and fans them -18/9/0/9/18°
@@ -479,7 +497,7 @@ pub fn tick_firewall_waits(
 ) {
     let frame = tick.frame();
     for (entity, id, wait, cd) in waiting.iter().sort::<&NetId>() {
-        if !crate::sim::slow_update_due(frame, id.0) || cd.is_some_and(|c| c.remaining > 0.0) {
+        if !crate::sim::slow_update_due(frame, id.0) || cd.is_some() {
             continue;
         }
         commands.entity(entity).remove::<FirewallWait>();
@@ -770,8 +788,6 @@ pub fn process_command_fire(
     weapons: Res<WeaponRegistry>,
     protect_targets: Query<(Entity, &TeamId, &GlobalTransform), With<Health>>,
     health_q: Query<&Health>,
-    live_units: Query<(&UnitType, &TeamId), Without<Dying>>,
-    mine_spawns: Res<MineSpawnQueue>,
     mut visuals: SigTermVisuals,
     gravity: Option<Res<crate::sim::MapGravity>>,
     mut sounds: Option<ResMut<crate::audio::SoundQueue>>,
@@ -790,7 +806,9 @@ pub fn process_command_fire(
         // once) drop the order. The Firewall keeps it (below), and the
         // NX is a weapon order (`specialattack.lua` swaps it for an
         // ATTACK): the Pointer aims and fires once reloaded.
-        let recharging = cd.is_some_and(|c| c.remaining > 0.0);
+        // Recharging until the cooldown is gone (a Lua ability's waits
+        // for its grid frame at 0 s left).
+        let recharging = cd.is_some();
         if recharging && !matches!(unit.0, UnitKind::Pointer | UnitKind::Firewall) {
             continue;
         }
@@ -859,13 +877,9 @@ pub fn process_command_fire(
             if armored {
                 continue;
             }
-            // Why: `spawn_queued_mines` drops every mine past the Logic
-            // Bomb cap, so a cast with no room left would burn 6000 HP
-            // and the reload for nothing — refuse it up front instead.
-            let limit = unit_registry.team_limit(UnitKind::LogicBomb);
-            if logic_bombs_at_cap(team.0, limit, &live_units, &mine_spawns) {
-                continue;
-            }
+            // No check of the Logic Bomb cap here: `LaunchMines` pays the
+            // 6000 HP and reloads whatever `lua_GetLogicBombLeft` says,
+            // and fires no tube at the cap ([`tick_mine_launches`]).
             if !health_q.get(event.attacker).is_ok_and(can_pay_for_mines) {
                 continue;
             }
@@ -1333,31 +1347,10 @@ pub fn tick_mine_launches(
     }
 }
 
-/// Whether `team` has no room left under the Logic Bomb `UnitRestricted`
-/// cap `limit` ([`UnitRegistry::team_limit`]; `None` = uncapped),
-/// counting live mines plus mines already queued this frame.
-fn logic_bombs_at_cap(
-    team: u8,
-    limit: Option<u32>,
-    live_units: &Query<(&UnitType, &TeamId), Without<Dying>>,
-    mine_spawns: &MineSpawnQueue,
-) -> bool {
-    let Some(limit) = limit else {
-        return false;
-    };
-    let live = crate::units::lifecycle::bookkeeping::team_kind_count(
-        UnitKind::LogicBomb,
-        team,
-        live_units,
-    );
-    let queued = mine_spawns.0.iter().filter(|m| m.team == team).count() as u32;
-    live + queued >= limit
-}
-
-/// byte.bos `LaunchMines`: `if((get LUA1)<(HITPOINT_COST)) return 0`,
-/// plus [`MINELAUNCHER_HP_FLOOR`].
+/// byte.bos `LaunchMines`: `if((get LUA1)<(HITPOINT_COST)) return 0` —
+/// a Byte with exactly 6000 HP may launch, and the cost kills it.
 fn can_pay_for_mines(health: &Health) -> bool {
-    health.current >= MINELAUNCHER_HP_COST + MINELAUNCHER_HP_FLOOR
+    health.current >= MINELAUNCHER_HP_COST
 }
 
 /// byte.bos `lua_Damage(HITPOINT_COST)` → LuaCOB.lua `Damage`:
@@ -1398,15 +1391,19 @@ fn apply_firewall(
     }
 }
 
+/// Run the protections down; one that ran out ends on the gadget's next
+/// `(time + 3) % 16` frame ([`firewall_grid_frame`]).
 pub fn tick_protection(
     time: Res<Time>,
+    tick: Res<crate::sim::SimTick>,
     mut query: Query<(Entity, &mut Protected)>,
     mut commands: Commands,
 ) {
     let dt = time.delta_secs();
+    let grid = firewall_grid_frame(tick.frame());
     for (entity, mut protected) in &mut query {
         protected.remaining -= dt;
-        if protected.remaining <= 0.0 {
+        if protected.remaining <= 0.0 && grid {
             commands.entity(entity).remove::<Protected>();
         }
     }
@@ -1416,13 +1413,17 @@ pub fn tick_protection(
 /// remove the component so the caster becomes eligible again.
 pub fn tick_command_fire_cooldown(
     time: Res<Time>,
-    mut query: Query<(Entity, &mut CommandFireCooldown)>,
+    tick: Res<crate::sim::SimTick>,
+    mut query: Query<(Entity, &mut CommandFireCooldown, Option<&UnitType>)>,
     mut commands: Commands,
 ) {
     let dt = time.delta_secs();
-    for (entity, mut cd) in &mut query {
+    let frame = tick.frame();
+    for (entity, mut cd, kind) in &mut query {
         cd.remaining -= dt;
-        if cd.remaining <= 0.0 {
+        // The Lua abilities clear on their gadget's grid; till then the
+        // recharge holds (at 0 s on the button).
+        if cd.remaining <= 0.0 && kind.is_none_or(|k| lua_grid_frame(k.0, frame)) {
             commands.entity(entity).remove::<CommandFireCooldown>();
         }
     }
@@ -1964,7 +1965,8 @@ mod tests {
     /// `UnitCreated`); weapon casters start loaded.
     #[test]
     fn lua_abilities_start_recharging() {
-        assert!((LUA_ABILITY_RELOAD - 96.0).abs() < 1e-4);
+        // 90 × 32 frames, run out on the 2880th step.
+        assert_eq!(LUA_ABILITY_RELOAD, crate::sim::countdown_secs(2880));
         for kind in [UnitKind::Terminal, UnitKind::Firewall] {
             let cd = initial_cooldown(kind).expect("starts recharging");
             assert_eq!(cd.remaining, LUA_ABILITY_RELOAD);
@@ -1981,7 +1983,7 @@ mod tests {
     #[test]
     fn firewall_protects_a_plane_cylinder_for_640_frames() {
         use bevy::ecs::system::RunSystemOnce;
-        assert!((FIREWALL_DURATION * 30.0 - 640.0).abs() < 1e-3);
+        assert_eq!(FIREWALL_DURATION, crate::sim::countdown_secs(640));
 
         let mut world = World::new();
         let spawn = |world: &mut World, team: u8, pos: Vec3| {
@@ -2158,12 +2160,51 @@ mod tests {
         // Still recharging on its slow update (frame + 3 ≡ 0 mod 15).
         assert_eq!(run(&mut app, 12), 0);
         app.world_mut()
-            .get_mut::<CommandFireCooldown>(firewall)
-            .unwrap()
-            .remaining = 0.0;
+            .entity_mut(firewall)
+            .remove::<CommandFireCooldown>();
         assert_eq!(run(&mut app, 13), 0, "between slow updates");
         assert_eq!(run(&mut app, 27), 1);
         assert!(app.world().get::<FirewallWait>(firewall).is_none());
+    }
+
+    /// A Lua ability's recharge (and a protection) that ran out ends on
+    /// the gadget's 16-frame grid: the Firewall's `(f + 3) % 16`, the
+    /// Terminal's `f % 16`; a weapon ability's on the frame it runs out.
+    #[test]
+    fn lua_timers_end_on_the_gadgets_grid() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        world.init_resource::<Time>();
+        let spawn = |world: &mut World, kind| {
+            world
+                .spawn((UnitType(kind), CommandFireCooldown { remaining: 0.0 }))
+                .id()
+        };
+        let firewall = spawn(&mut world, UnitKind::Firewall);
+        let terminal = spawn(&mut world, UnitKind::Terminal);
+        let pointer = spawn(&mut world, UnitKind::Pointer);
+        let shielded = world.spawn(Protected { remaining: 0.0 }).id();
+        let has = |world: &World, e| {
+            (
+                world.get::<CommandFireCooldown>(e).is_some(),
+                world.get::<Protected>(e).is_some(),
+            )
+        };
+        let step = |world: &mut World, frame| {
+            world.insert_resource(crate::sim::SimTick(frame));
+            world.run_system_once(tick_command_fire_cooldown).unwrap();
+            world.run_system_once(tick_protection).unwrap();
+        };
+        step(&mut world, 1);
+        assert!(!has(&world, pointer).0, "no grid for a weapon ability");
+        assert!(has(&world, firewall).0 && has(&world, terminal).0);
+        assert!(has(&world, shielded).1);
+        step(&mut world, 13);
+        assert!(!has(&world, firewall).0, "(13 + 3) % 16 == 0");
+        assert!(!has(&world, shielded).1);
+        assert!(has(&world, terminal).0);
+        step(&mut world, 16);
+        assert!(!has(&world, terminal).0);
     }
 
     /// A move or stop order ends a pending NX shot like any other order
@@ -2308,49 +2349,33 @@ mod tests {
 
         app.world_mut().entity_mut(byte).remove::<Armored>();
         app.world_mut().entity_mut(byte).insert(Health {
-            current: MINELAUNCHER_HP_COST + MINELAUNCHER_HP_FLOOR - 1.0,
+            current: MINELAUNCHER_HP_COST - 1.0,
             max: 15_000.0,
         });
         cast(&mut app, byte, Vec3::ZERO);
         assert!(app.world().get::<MineLaunch>(byte).is_none());
+
+        // Exactly 6000 HP: `<` is the test, so it launches (and dies).
+        app.world_mut().entity_mut(byte).insert(Health {
+            current: MINELAUNCHER_HP_COST,
+            max: 15_000.0,
+        });
+        cast(&mut app, byte, Vec3::ZERO);
+        assert!(app.world().get::<MineLaunch>(byte).is_some());
     }
 
-    /// Mines already on the map plus mines queued this frame count
-    /// against the team's Logic Bomb cap; other teams don't.
+    /// At the Logic Bomb cap the order is still taken: `LaunchMines`
+    /// pays the 6000 HP and reloads with `lb = 0`, firing no tube.
     #[test]
-    fn logic_bomb_cap_counts_live_and_queued_mines() {
-        use bevy::ecs::system::RunSystemOnce;
-        // logic_bomb.fbi `UnitRestricted=64`.
-        let limit = 64;
-        let mut app = App::new();
-        for _ in 0..limit - 1 {
+    fn minelauncher_at_the_cap_still_pays() {
+        let mut app = cast_app(&[]);
+        for _ in 0..64 {
             app.world_mut()
                 .spawn((UnitType(UnitKind::LogicBomb), TeamId(0)));
         }
-        let mut queue = MineSpawnQueue::default();
-        let check = move |queue: MineSpawnQueue| {
-            move |live: Query<(&UnitType, &TeamId), Without<Dying>>| {
-                (
-                    logic_bombs_at_cap(0, Some(limit), &live, &queue),
-                    logic_bombs_at_cap(1, Some(limit), &live, &queue),
-                )
-            }
-        };
-        let (own, other) = app
-            .world_mut()
-            .run_system_once(check(queue.clone()))
-            .unwrap();
-        assert!(!own, "one slot left");
-        assert!(!other);
-
-        queue.push(MineSpawn {
-            position: Vec3::ZERO,
-            faction: Faction::System,
-            team: 0,
-        });
-        let (own, other) = app.world_mut().run_system_once(check(queue)).unwrap();
-        assert!(own, "the queued mine fills the last slot");
-        assert!(!other);
+        let byte = spawn_caster(&mut app, UnitKind::Byte, Vec3::ZERO);
+        cast(&mut app, byte, Vec3::ZERO);
+        assert!(app.world().get::<MineLaunch>(byte).is_some());
     }
 
     /// One sim frame of every SIGTERM stage.

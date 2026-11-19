@@ -73,6 +73,19 @@ impl ChatLog {
         self.count += 1;
     }
 
+    /// A line from the game itself (a gadget's `Spring.SendMessage`): no
+    /// sender, printed bare.
+    pub fn push_game(&mut self, at: Duration, text: String) {
+        self.push(
+            at,
+            ChatLine {
+                from: PeerId(0),
+                name: String::new(),
+                text,
+            },
+        );
+    }
+
     /// The newest `n` lines, oldest first.
     pub fn last(&self, n: usize) -> impl Iterator<Item = &(Duration, ChatLine)> {
         self.lines.iter().skip(self.lines.len().saturating_sub(n))

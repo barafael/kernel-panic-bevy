@@ -32,11 +32,15 @@ use bevy::picking::Pickable;
 use bevy::prelude::*;
 
 use crate::game_setup::AppState;
+use crate::game_setup::GameSetup;
 use crate::net::MatchControl;
 use crate::net::chat::{CHAT_MAX, ChatInput, ChatLog, type_into};
 use crate::net::driver::{NetSession, NetStatus, Notice, PeerNames};
 use crate::net::session::Ended;
 use crate::sim::DetFloat;
+use crate::units::combat::LeadTaken;
+use crate::units::components::{TeamId, UnitType};
+use crate::units::content::definitions::UnitKind;
 use crate::units::player::LocalTeam;
 use crate::units::teams::Alliances;
 
@@ -98,12 +102,105 @@ impl Plugin for NetOverlayPlugin {
                     show_player_list,
                     show_banner,
                     type_chat,
+                    announce_leads,
                     show_chat,
                 )
                     .chain()
                     .run_if(in_state(AppState::InGame)),
             )
             .add_systems(OnExit(AppState::InGame), close_chat);
+    }
+}
+
+/// `taken_the_lead.lua`'s side of a team: what its units make it —
+/// homebase, minifac, constructor, then special building, in the
+/// gadget's order — else the side it started with.
+fn team_side(team: u8, units: &Query<(&UnitType, &TeamId)>, setup: Option<&GameSetup>) -> String {
+    const SIDES: [(UnitKind, &str); 12] = [
+        (UnitKind::Kernel, "System"),
+        (UnitKind::Hole, "Hacker"),
+        (UnitKind::Carrier, "Network"),
+        (UnitKind::Socket, "System"),
+        (UnitKind::Window, "Hacker"),
+        (UnitKind::Port, "Network"),
+        (UnitKind::Assembler, "System"),
+        (UnitKind::Trojan, "Hacker"),
+        (UnitKind::Gateway, "Network"),
+        (UnitKind::Terminal, "System"),
+        (UnitKind::Obelisk, "Hacker"),
+        (UnitKind::Firewall, "Network"),
+    ];
+    SIDES
+        .iter()
+        .find(|(kind, _)| units.iter().any(|(u, t)| u.0 == *kind && t.0 == team))
+        .map(|(_, side)| (*side).to_string())
+        .or_else(|| {
+            setup
+                .and_then(|s| s.players.get(usize::from(team)))
+                .map(|p| format!("{:?}", p.faction))
+        })
+        .unwrap_or_else(|| "Faction".to_string())
+}
+
+/// The names `taken_the_lead.lua` puts after the team number: its active
+/// players, or for an AI team the Lua AI's name.
+fn team_names(
+    team: u8,
+    setup: Option<&GameSetup>,
+    status: Option<&NetStatus>,
+    names: Option<&PeerNames>,
+) -> Vec<String> {
+    if setup
+        .and_then(|s| s.players.get(usize::from(team)))
+        .is_some_and(|p| p.ai)
+    {
+        return vec!["Kernel Panic AI".to_string()];
+    }
+    let (Some(status), Some(names)) = (status, names) else {
+        return Vec::new();
+    };
+    status
+        .peers
+        .iter()
+        .filter(|p| p.player == Some(team) && !p.gone)
+        .map(|p| names.name(p.peer))
+        .collect()
+}
+
+/// The console line of a [`LeadTaken`]: `"Team"..at..names.."'s
+/// "..side.." has taken the lead with "..count.." kills!"`.
+fn lead_text(team: u8, names: &[String], side: &str, kills: u32) -> String {
+    let names = if names.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", names.join(", "))
+    };
+    format!("Team{team}{names}'s {side} has taken the lead with {kills} kills!")
+}
+
+/// Print each [`LeadTaken`] to the console.
+#[allow(clippy::too_many_arguments)]
+fn announce_leads(
+    mut leads: MessageReader<LeadTaken>,
+    units: Query<(&UnitType, &TeamId)>,
+    setup: Option<Res<GameSetup>>,
+    status: Option<Res<NetStatus>>,
+    names: Option<Res<PeerNames>>,
+    time: Res<Time<Real>>,
+    mut log: ResMut<ChatLog>,
+) {
+    for lead in leads.read() {
+        let side = team_side(lead.team, &units, setup.as_deref());
+        let who = team_names(
+            lead.team,
+            setup.as_deref(),
+            status.as_deref(),
+            names.as_deref(),
+        );
+        log.push_game(
+            time.elapsed(),
+            lead_text(lead.team, &who, &side, lead.kills),
+        );
     }
 }
 
@@ -160,7 +257,13 @@ fn chat_text(log: &ChatLog, input: &ChatInput, now: Duration) -> Option<String> 
     let mut lines: Vec<String> = log
         .last(CHAT_ROWS)
         .filter(|(at, _)| input.open || now.saturating_sub(*at) < CHAT_SHOW)
-        .map(|(_, l)| format!("{}: {}", l.name, l.text))
+        .map(|(_, l)| {
+            if l.name.is_empty() {
+                l.text.clone()
+            } else {
+                format!("{}: {}", l.name, l.text)
+            }
+        })
         .collect();
     if input.open {
         lines.push(format!("Say: {}_", input.text));
@@ -597,6 +700,23 @@ mod tests {
         assert_eq!(
             chat_text(&log, &ChatInput::default(), Duration::from_secs(60)),
             None
+        );
+    }
+
+    /// taken_the_lead.lua's line: the team, its names, its side.
+    #[test]
+    fn the_lead_line_reads_like_the_gadgets() {
+        assert_eq!(
+            lead_text(2, &["Kernel Panic AI".into()], "Hacker", 7),
+            "Team2 Kernel Panic AI's Hacker has taken the lead with 7 kills!"
+        );
+        assert_eq!(
+            lead_text(0, &["ann".into(), "bob".into()], "System", 1),
+            "Team0 ann, bob's System has taken the lead with 1 kills!"
+        );
+        assert_eq!(
+            lead_text(1, &[], "Network", 3),
+            "Team1's Network has taken the lead with 3 kills!"
         );
     }
 

@@ -152,20 +152,6 @@ pub fn team_kind_counts(
     counts
 }
 
-/// Live units of `kind` on `team` — the single-team form of
-/// [`team_kind_counts`], shared by the command panel's cap indicator and
-/// the Mine Launcher's cap check so both agree with the enforcement.
-pub fn team_kind_count(
-    kind: UnitKind,
-    team: u8,
-    units: &Query<(&UnitType, &TeamId), Without<Dying>>,
-) -> u32 {
-    units
-        .iter()
-        .filter(|(unit, t)| unit.0 == kind && t.0 == team)
-        .count() as u32
-}
-
 /// Upstream's per-team unit ceiling: KP's `MaxUnits` mod option
 /// (`EngineOptions.lua`, default 1000 — "how many units and buildings
 /// a player is allowed to own at the same time"), which the engine

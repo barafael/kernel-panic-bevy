@@ -6,3 +6,4 @@
 pub mod animation;
 pub mod meshes;
 pub mod model_fade;
+pub mod unit_overlay;

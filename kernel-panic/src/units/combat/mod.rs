@@ -51,9 +51,9 @@ pub use aim::{
     sync_deploy_state,
 };
 pub use damage::{
-    Armored, Attacker, BurstFire, BurstRng, DamageQueue, DelayedDamage, Hit, Infected,
-    PendingDamage, VirusSpawn, VirusSpawnQueue, apply_damage, apply_death_blasts, tick_burst_fire,
-    tick_infections, update_armored,
+    Armored, Attacker, BurstFire, BurstRng, DamageQueue, DelayedDamage, Hit, Infected, KillTally,
+    LeadTaken, LethalHits, PendingDamage, VirusSpawn, VirusSpawnQueue, apply_damage,
+    apply_death_blasts, tick_burst_fire, tick_infections, update_armored,
 };
 pub use lifecycle::{
     Dying, PARALYZE_DECLINE, SelfDestructCountdown, Stunned, auto_heal, cleanup_dying,
@@ -988,7 +988,7 @@ pub fn combat_system(
                 Has<DebugBlasted>,
                 &NetId,
                 Option<&engage::LastAttacker>,
-                Has<super::mechanics::worm::Surfaced>,
+                Option<&super::mechanics::worm::WormFireState>,
             ),
         ),
         (
@@ -1049,7 +1049,7 @@ pub fn combat_system(
         worm_splash,
         mut aim_slot,
         mut cache_slot,
-        (nx_cast, debug_blasted, net_id, last_hit, surfaced),
+        (nx_cast, debug_blasted, net_id, last_hit, fire_state),
     ) in attackers.iter_mut().sort::<&NetId>()
     {
         // pointer.bos `AimWeapon1`: `if (aimingSpecial) return 0` — a
@@ -1064,11 +1064,10 @@ pub fn combat_system(
         if cloaked && autohold.is_none() {
             continue;
         }
-        // worm.bos `STANDINGFIREORDERS=0` while cloaked with AutoHold on:
-        // hold fire — only the player's explicit targets engage. A Worm
-        // already surfacing (`AimWeapon1` sets fire at will) whose cloak
-        // waits for the slow update fires at will.
-        let hold_fire = cloaked && !surfaced && autohold.is_some_and(|a| a.0);
+        // worm.bos `STANDINGFIREORDERS=0` (cloaked with AutoHold on, as
+        // its script last set it): hold fire — only the player's explicit
+        // targets engage.
+        let hold_fire = fire_state.is_some_and(|s| s.hold);
         // Scans come from `CWeapon::SlowUpdate`: the unit's first one
         // from `earliest` on. Units stagger by id there, so attackers
         // whose shared target died don't all rescan on one frame ever
@@ -2632,6 +2631,7 @@ mod tests {
                     WeaponBinding(bite),
                     WormSplash(splash),
                     AutoHold(hold),
+                    crate::units::mechanics::worm::WormFireState::settled(hold, true),
                     Cloaked,
                 ))
                 .id();

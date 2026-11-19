@@ -775,8 +775,9 @@ pub fn production_system(
         spawns.drain(..)
     {
         let entity = spawn_unit_facing(kind, faction, team, spawn_pos, heading, &mut ctx);
-        // Inserted before `init_autohold`'s `Without<AutoHold>` pass
-        // sees the unit, so the factory's state wins over the default.
+        // Inserted before `init_autohold` sees the unit, so the
+        // factory's state wins over the default (and seeds the Worm's
+        // script fire state).
         if kind.has_autohold()
             && let Ok(hold) = autoholds.get(factory)
         {
@@ -802,7 +803,11 @@ pub fn production_system(
                 .insert(NewUnitOrders(orders.commands.clone()));
         }
         if driven {
-            ctx.commands.entity(entity).insert(BuildDriven::default());
+            // `CFactory::StartBuild`: `buildee->soloBuilder = this`.
+            ctx.commands.entity(entity).insert(BuildDriven {
+                solo_builder: Some(factory),
+                ..BuildDriven::default()
+            });
             if let Ok((_, mut producer, ..)) = producers.get_mut(factory) {
                 producer.buildee = Some(entity);
             }
