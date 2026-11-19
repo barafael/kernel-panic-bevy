@@ -131,6 +131,25 @@ pub async fn play(
     map: MapInput,
     options: &PlayOptions,
 ) -> Result<Played, ReplayError> {
+    let ticks = options.ticks.unwrap_or(replay.ticks);
+    play_session(
+        replay,
+        map,
+        options,
+        NetSession::replay(&replay.frames, ticks),
+    )
+    .await
+}
+
+/// [`play`] with the session `net` driving the match: the replay's own
+/// ([`NetSession::replay`]), or an autosave being loaded
+/// ([`crate::net::session::Session::resume`]).
+async fn play_session(
+    replay: &Replay,
+    map: MapInput,
+    options: &PlayOptions,
+    net: NetSession,
+) -> Result<Played, ReplayError> {
     let current = Compat::current(&map.bytes);
     if current != replay.compat && !options.ignore_compat {
         return Err(ReplayError::Compat {
@@ -157,7 +176,6 @@ pub async fn play(
     // (no catch-up), or as many as a player's speed change makes the
     // driver run — the sim is a function of the turns, not of how they
     // fall into frames.
-    let net = NetSession::replay(&replay.frames, ticks as u32);
     h.world_mut().insert_resource(net);
     let mut shuffle_rng = 0x5eed_u32;
     let mut next_shuffle = 0;
@@ -391,6 +409,45 @@ mod tests {
             Replay::decode(b"nonsense"),
             Err(ReplayError::Magic)
         ));
+    }
+
+    /// A loaded autosave (`net::autosave`) is the match it saved: the
+    /// golden match with commands, saved halfway, played on through the
+    /// resume path (its first half off the clock, then live with nobody
+    /// at the controls) matches tick for tick the replay of the same
+    /// half-log.
+    #[test]
+    fn a_loaded_autosave_plays_as_its_replay() {
+        let path =
+            crate::paths::from_project_root("kernel-panic/tests/golden/commands_marble.kpreplay");
+        let full = Replay::decode(&std::fs::read(path).unwrap()).unwrap();
+        let cut = full.ticks / 2;
+        let saved = Replay {
+            frames: full
+                .frames
+                .iter()
+                .filter(|f| f.tick < cut)
+                .cloned()
+                .collect(),
+            ..full.clone()
+        };
+        assert!(!saved.frames.is_empty() && saved.frames.len() < full.frames.len());
+        let map = || MapInput::checkout(&saved.setup.map).expect("the shipped map");
+        let options = PlayOptions::default();
+        let replayed = bevy::tasks::block_on(play(&saved, map(), &options)).unwrap();
+        let resumed = bevy::tasks::block_on(play_session(
+            &saved,
+            map(),
+            &options,
+            NetSession::new(crate::net::session::Session::resume(&saved.frames, cut)),
+        ))
+        .unwrap();
+        assert_eq!(replayed.hashes.len(), full.ticks as usize);
+        assert_eq!(
+            first_difference(&trail_text(&replayed.hashes), &trail_text(&resumed.hashes)),
+            None,
+            "the resumed match left its replay"
+        );
     }
 
     /// A player's speed change in the log: the driver then runs several

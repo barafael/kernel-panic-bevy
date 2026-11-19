@@ -134,6 +134,10 @@ const FRAME_LOOP_EXCLUSIVE: &[(&str, &str)] = &[
         "reads the match to save its replay file as the game quits; writes only the session's \"kept\" flag",
     ),
     (
+        "net::autosave::write_autosave",
+        "reads the match to write the single-player autosave every 5 minutes; writes only its own slot mark and the bytes kept for the web",
+    ),
+    (
         "net::lobby::back_to_room",
         "moves a match's connection into the lobby (`BackToRoom` → `LobbyRoom`)",
     ),

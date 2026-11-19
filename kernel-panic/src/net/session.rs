@@ -676,6 +676,9 @@ pub struct Session {
     log: Vec<CommandFrame>,
     /// A replay ([`Self::replay`]): its log, played turn by turn.
     replay: Option<ReplayLog>,
+    /// An autosave being loaded ([`Self::resume`]): the tick its turns
+    /// run to before the match is live.
+    resume_end: Option<u32>,
     pub stats: SessionStats,
 }
 
@@ -722,6 +725,7 @@ impl Session {
             frame_tick: 0,
             log: Vec::new(),
             replay: None,
+            resume_end: None,
             stats: SessionStats::default(),
         }
     }
@@ -747,6 +751,46 @@ impl Session {
             replay: Some(ReplayLog::new(frames, ticks)),
             ..Self::base(Role::Guest(Box::default()))
         }
+    }
+
+    /// Single player resumed from an autosave (`spawn_units.lua`'s
+    /// `AutoSave`, here a replay log): a solo host with the saved
+    /// commands scheduled on their ticks. The driver runs those `ticks`
+    /// as fast as it can ([`Self::resuming`]), then the match goes on
+    /// live; the saved turns are logged like any, so the match's
+    /// replay and later autosaves hold the whole match.
+    pub fn resume(frames: &[CommandFrame], ticks: u32) -> Self {
+        let mut s = Self::solo();
+        let mut saved: Vec<&CommandFrame> = frames.iter().filter(|f| f.tick < ticks).collect();
+        saved.sort_by_key(|f| (f.tick, f.player));
+        if let Role::Host(h) = &mut s.role {
+            let mut seqs: BTreeMap<u8, u32> = BTreeMap::new();
+            for f in saved {
+                let seq = seqs.entry(f.player).or_default();
+                h.accept(
+                    f.player,
+                    Batch {
+                        seq: *seq,
+                        target: f.tick,
+                        commands: f.commands.clone(),
+                    },
+                    false,
+                    &mut s.stats,
+                );
+                *seq += 1;
+            }
+            // Our own batches number on from the saved ones (single
+            // player: one human seat), or the first live ones would be
+            // taken for repeats.
+            h.own_seq = seqs.values().copied().max().unwrap_or(0);
+        }
+        s.resume_end = (ticks > 0).then_some(ticks);
+        s
+    }
+
+    /// Loading an autosave: the saved turns are still being run.
+    pub fn resuming(&self) -> bool {
+        self.resume_end.is_some_and(|end| self.turns.next() < end)
     }
 
     /// A networked match over `transport`.
@@ -843,8 +887,8 @@ impl Session {
     }
 
     /// The commands of every turn applied so far, by tick then player
-    /// (non-empty frames only): a replay's command log.
-    #[cfg(test)]
+    /// (non-empty frames only): a replay's command log (an autosave
+    /// writes it mid-match).
     pub fn log(&self) -> &[CommandFrame] {
         &self.log
     }

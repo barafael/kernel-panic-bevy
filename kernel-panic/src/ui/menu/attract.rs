@@ -432,6 +432,56 @@ fn clear_pitch(hm: &Heightmap, focus: Vec3, yaw: f32, distance: f32, pitch: f32)
 /// The focus stays this fraction of the map in from its edges.
 const EDGE_INSET: f32 = 0.06;
 
+/// Half the camera's vertical field of view (Bevy's default
+/// `PerspectiveProjection`, π/4) and half its horizontal one on a 16:9
+/// screen (`atan(tan(π/8) · 16/9)`).
+const HALF_FOV: f32 = std::f32::consts::FRAC_PI_8;
+const HALF_FOV_WIDE: f32 = 0.635;
+/// How far past the map's edge the view may reach (elmos): the outer
+/// walls stand on the edge, so a sliver of what lies behind them is
+/// part of any shot of a wall.
+const VIEW_SLACK: f32 = 96.0;
+/// The yaw step the orbit looks ahead by, to tell whether turning on
+/// takes the view further off the map.
+const YAW_PROBE: f32 = 0.02;
+
+/// How far (elmos) the view from an orbit at `yaw`, `pitch` and
+/// `distance` round `focus` reaches past the map: the farthest, beyond
+/// [`VIEW_SLACK`], of the ground points under the screen's top corners,
+/// top middle and bottom middle. Off the map there is nothing but the
+/// sky colour and the fog — the dark band behind the outer wall. A view
+/// up to the horizon reaches out without end.
+fn view_overshoot(
+    focus: Vec3,
+    yaw: f32,
+    pitch: f32,
+    distance: f32,
+    (min, max): (Vec2, Vec2),
+) -> f32 {
+    let height = distance * ops::sin(pitch);
+    let back = Vec2::new(ops::sin(yaw), ops::cos(yaw));
+    let eye = focus.xz() + back * (distance * ops::cos(pitch));
+    let (look, side) = (-back, Vec2::new(back.y, -back.x));
+    let lo = min - Vec2::splat(VIEW_SLACK);
+    let hi = max + Vec2::splat(VIEW_SLACK);
+    [
+        (pitch - HALF_FOV, -HALF_FOV_WIDE),
+        (pitch - HALF_FOV, 0.0),
+        (pitch - HALF_FOV, HALF_FOV_WIDE),
+        (pitch + HALF_FOV, 0.0),
+    ]
+    .into_iter()
+    .map(|(below, across)| {
+        if below <= 0.01 {
+            return f32::MAX;
+        }
+        let reach = height / ops::tan(below);
+        let p = eye + look * reach + side * (reach * ops::tan(across));
+        (p - p.clamp(lo, hi)).length()
+    })
+    .fold(0.0, f32::det_max)
+}
+
 fn roll() -> f32 {
     clock_f64() as f32
 }
@@ -674,6 +724,20 @@ pub(super) fn attract_camera(
         ride_terrain(&mut state.focus, &mut director.floor);
     }
     let ease = (EASE * dt).det_min(1.0);
+    // Turning the view further off the map: the orbit swings back, so a
+    // shot near an edge sweeps along it instead of looking out over the
+    // wall into the void.
+    let (focus, distance) = (state.focus, state.distance);
+    let off_map = |yaw: f32, pitch: f32| view_overshoot(focus, yaw, pitch, distance, (min, max));
+    let off_now = off_map(state.yaw, state.pitch);
+    if off_now > 0.0
+        && off_map(
+            state.yaw + YAW_PROBE * director.yaw_rate.signum(),
+            state.pitch,
+        ) > off_now
+    {
+        director.yaw_rate = -director.yaw_rate;
+    }
     director.yaw_rate_now += (director.yaw_rate - director.yaw_rate_now) * ease;
     state.yaw += director.yaw_rate_now * dt;
     // A slight sway on top of the shot's pitch, so a long hold breathes.
@@ -681,7 +745,21 @@ pub(super) fn attract_camera(
     let mut pitch_ease = ease;
     if let Some(hm) = heightmap.as_deref() {
         // Over a wall in the way, tilting up quickly.
-        let clear = clear_pitch(hm, state.focus, state.yaw, state.distance, pitch);
+        let mut clear = clear_pitch(hm, state.focus, state.yaw, state.distance, pitch);
+        // And down onto the map while the turn brings the view back: the
+        // shallowest pitch that keeps the view on the map, else the one
+        // that shows the least past it (tilting up does not help an eye
+        // that hangs over the void itself; the swing does).
+        let mut best = (off_map(state.yaw, clear), clear);
+        let mut p = clear;
+        while best.0 > 0.0 && p < PITCH_MAX {
+            p = (p + PITCH_STEP).det_min(PITCH_MAX);
+            let off = off_map(state.yaw, p);
+            if off < best.0 {
+                best = (off, p);
+            }
+        }
+        clear = best.1;
         if clear > pitch {
             pitch = clear;
             if clear > state.pitch {
@@ -729,6 +807,31 @@ mod tests {
     }
 
     const BOUNDS: (Vec2, Vec2) = (Vec2::ZERO, Vec2::splat(4096.0));
+
+    /// A shot near the west edge shows the void when it looks west, not
+    /// when it looks east; a shallow look reaches further than a steep
+    /// one, and one up to the horizon reaches out without end.
+    #[test]
+    fn the_view_off_the_map_is_measured() {
+        let focus = Vec3::new(300.0, 0.0, 2048.0);
+        // The eye sits at `focus + (sin yaw, ·, cos yaw)`: yaw π/2 puts
+        // it east of the focus, looking west.
+        let west = std::f32::consts::FRAC_PI_2;
+        let east = -west;
+        assert!(view_overshoot(focus, west, 0.8, 1200.0, BOUNDS) > 0.0);
+        // Looking east from 700 in, the eye still hangs over the map.
+        let inside = Vec3::new(700.0, 0.0, 2048.0);
+        assert_eq!(view_overshoot(inside, east, 1.2, 1200.0, BOUNDS), 0.0);
+        // From 300 in it hangs over the void: the screen's bottom shows it.
+        assert!(view_overshoot(focus, east, 1.2, 1200.0, BOUNDS) > 0.0);
+        let centre = Vec3::new(2048.0, 0.0, 2048.0);
+        assert_eq!(view_overshoot(centre, west, 1.0, 1200.0, BOUNDS), 0.0);
+        assert!(
+            view_overshoot(centre, west, 0.6, 1200.0, BOUNDS)
+                > view_overshoot(centre, west, 0.8, 1200.0, BOUNDS)
+        );
+        assert_eq!(view_overshoot(centre, west, 0.3, 1200.0, BOUNDS), f32::MAX);
+    }
 
     #[test]
     fn the_orbit_tilts_to_look_over_a_wall() {

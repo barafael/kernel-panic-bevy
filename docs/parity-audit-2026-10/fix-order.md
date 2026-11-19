@@ -174,6 +174,15 @@ Checked and not gaps:
 - Factory products record their factory as `soloBuilder`
   (`CFactory::StartBuild`).
 
+## Autosave
+
+`spawn_units.lua`'s single-player AutoSave every `30*60*5` frames is a
+replay log (`net::autosave`): `autosave.kpsave` beside the replays (the
+web keeps it for the page session); Replays → Resume plays its turns off
+the clock (`Session::resume`) and the match goes on live. A loaded save
+matches its replay tick for tick
+(`headless::replay::a_loaded_autosave_plays_as_its_replay`).
+
 ## Still open (observed in-parities)
 
 - The morph's alpha dissolve is not drawn.
@@ -183,5 +192,3 @@ Checked and not gaps:
   of the remake's slack ladder).
 - The Signal's flight constants follow the engine source but were not
   compared with the original's flight time (needs the original running).
-- Single-player autosave (`spawn_units.lua`) is not ported: the port has
-  no save / load.

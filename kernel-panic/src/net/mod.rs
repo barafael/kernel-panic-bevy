@@ -36,6 +36,7 @@ pub(crate) mod apply;
 mod audit;
 #[cfg(not(target_arch = "wasm32"))]
 mod autopilot;
+pub mod autosave;
 pub mod chat;
 pub(crate) mod codec;
 pub mod compat;

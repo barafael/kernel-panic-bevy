@@ -4,6 +4,7 @@
 //! on the web it is this page session's matches plus the files opened
 //! with "Open file…". Play starts the viewer (`ui::hud::replay_bar`).
 
+use crate::net::autosave::{AutosaveBytes, read_autosave};
 use std::collections::BTreeMap;
 
 use bevy::prelude::*;
@@ -28,6 +29,8 @@ pub(crate) enum ReplaysAction {
     Page(i32),
     /// Web: open a `.kpreplay` file.
     Open,
+    /// Load the single-player autosave (`crate::net::autosave`).
+    Resume,
 }
 
 /// Where a listed replay's bytes are.
@@ -51,6 +54,8 @@ pub(crate) struct ReplayShelf {
     page: usize,
     /// The last thing worth saying (a replay that would not open).
     notice: Option<String>,
+    /// The autosave's match, when there is one that loads.
+    autosave: Option<String>,
 }
 
 pub(super) struct ReplaysPagePlugin;
@@ -73,11 +78,21 @@ impl Plugin for ReplaysPagePlugin {
 
 /// Re-read the list when the page is entered (natively the folder may
 /// have a new file) or the web's list changed.
-fn refresh_shelf(page: Res<MenuPage>, recent: Res<RecentReplays>, mut shelf: ResMut<ReplayShelf>) {
-    if *page != MenuPage::Replays || !(page.is_changed() || recent.is_changed()) {
+fn refresh_shelf(
+    page: Res<MenuPage>,
+    recent: Res<RecentReplays>,
+    autosave: Res<AutosaveBytes>,
+    mut shelf: ResMut<ReplayShelf>,
+) {
+    if *page != MenuPage::Replays
+        || !(page.is_changed() || recent.is_changed() || autosave.is_changed())
+    {
         return;
     }
     let shelf = &mut *shelf;
+    shelf.autosave = read_autosave(&autosave)
+        .and_then(|b| replay_log::open(&b).ok())
+        .map(|r| r.label());
     shelf.entries.clear();
     #[cfg(not(target_arch = "wasm32"))]
     for path in replay_log::list_files(&replay_log::replay_dir()) {
@@ -159,6 +174,7 @@ fn replays_actions(
     mut actions: MessageReader<ReplaysAction>,
     mut shelf: ResMut<ReplayShelf>,
     recent: Res<RecentReplays>,
+    autosave: Res<AutosaveBytes>,
     mut page: ResMut<MenuPage>,
     mut commands: Commands,
 ) {
@@ -195,6 +211,19 @@ fn replays_actions(
             ReplaysAction::Open => {
                 #[cfg(target_arch = "wasm32")]
                 web::open_file();
+            }
+            ReplaysAction::Resume => {
+                let opened = read_autosave(&autosave)
+                    .ok_or_else(|| "There is no autosave.".to_string())
+                    .and_then(|b| replay_log::open(&b));
+                match opened {
+                    Ok(replay) => {
+                        shelf.notice = None;
+                        crate::net::autosave::resume(&mut commands, replay);
+                        *page = MenuPage::Main;
+                    }
+                    Err(why) => shelf.notice = Some(why),
+                }
             }
         }
     }
@@ -289,6 +318,26 @@ pub(super) fn replays_page(
             (0.3, 0.12),
             Anchor::Cc,
             MenuAction::Replays(ReplaysAction::Open),
+        )
+        .spawn(commands, root);
+    }
+    if let Some(match_) = &shelf.autosave {
+        // spawn_units.lua's AutoSave: the single-player match, as of its
+        // last 5-minute mark.
+        LabelSpec::new(
+            &clip_chars(&format!("Autosave: {match_}"), 48),
+            size,
+            (0.62, 0.12),
+            Anchor::Rc,
+        )
+        .spawn(commands, root);
+        ButtonSpec::new(
+            "Resume",
+            BUTTON_GREEN,
+            size,
+            (0.92, 0.12),
+            Anchor::Rc,
+            MenuAction::Replays(ReplaysAction::Resume),
         )
         .spawn(commands, root);
     }

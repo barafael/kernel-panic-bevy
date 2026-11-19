@@ -549,9 +549,16 @@ pub struct ReplayLogPlugin;
 
 impl Plugin for ReplayLogPlugin {
     fn build(&self, app: &mut App) {
+        use crate::map_loading::MatchScopeAppExt;
         app.init_resource::<ActiveMapHash>()
             .init_resource::<RecentReplays>()
-            .add_systems(Last, save_on_exit);
+            .init_resource::<super::autosave::AutosaveBytes>()
+            .init_match_resource::<super::autosave::AutosaveMark>()
+            .add_systems(Last, save_on_exit)
+            .add_systems(
+                Last,
+                super::autosave::write_autosave.run_if(in_state(AppState::InGame)),
+            );
         #[cfg(not(target_arch = "wasm32"))]
         app.insert_resource(ReplayDir(Some(replay_dir())));
     }

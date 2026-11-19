@@ -99,13 +99,14 @@ pub(crate) fn begin_match(world: &mut World, setup: &GameSetup) {
     // A networked match the lobby started (or a replay the Replays page
     // opened) waits for its own swap: the attract demo's load, landing
     // first, must not take it (the session resets below would).
-    let (waiting, replay) = if setup.demo {
+    let (waiting, replay, resume) = if setup.demo {
         (
             world.remove_resource::<NextNetMatch>(),
             world.remove_resource::<NextReplay>(),
+            world.remove_resource::<crate::net::autosave::NextResume>(),
         )
     } else {
-        (None, None)
+        (None, None, None)
     };
     let resets: Vec<ResetFn> = world
         .get_resource::<MatchResources>()
@@ -118,6 +119,9 @@ pub(crate) fn begin_match(world: &mut World, setup: &GameSetup) {
         world.insert_resource(next);
     }
     if let Some(next) = replay {
+        world.insert_resource(next);
+    }
+    if let Some(next) = resume {
         world.insert_resource(next);
     }
 

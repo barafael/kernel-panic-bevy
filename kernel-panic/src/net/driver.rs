@@ -318,6 +318,7 @@ pub fn drive_frame(
     // Fast-forwarding has its own budget, as Spring's reconnect.
     let fast_forward = p.fast_forward;
     let balance = p.balance.as_mut().map(|b| (b.limit(now), Instant::now()));
+    let frame_start = Instant::now();
     while !s.halted() && !p.hold {
         if p.cost.is_some_and(|c| p.capacity < c) {
             rep.busy = true;
@@ -337,6 +338,20 @@ pub fn drive_frame(
                 break;
             }
             s.set_paused(paused);
+            if s.resuming() {
+                // Loading an autosave: the saved turns as fast as the
+                // frame's wall time allows, off the clock.
+                if rep.extra > 0 && frame_start.elapsed() >= FAST_FORWARD_BUDGET {
+                    break;
+                }
+                run_one(s, p, r, now);
+                rep.extra += 1;
+                p.acc = Duration::ZERO;
+                if !s.resuming() {
+                    info!("autosave loaded: live at tick {}", s.applied());
+                }
+                continue;
+            }
             if paused {
                 if !s.resume_pending(resumes_sim) {
                     break;
@@ -433,8 +448,13 @@ pub fn drive_frame(
 }
 
 fn run_one(s: &mut Session, p: &mut Pacer, r: &mut impl TickRunner, now: Duration) {
+    // While an autosave loads, the saved commands are the match: what
+    // the player orders meanwhile is dropped.
+    let resuming = s.resuming();
     for frame in r.seal(s.delay()) {
-        s.submit(frame);
+        if !resuming {
+            s.submit(frame);
+        }
     }
     if s.is_host() {
         s.cut(now);
@@ -608,6 +628,10 @@ impl FromWorld for NetSession {
     fn from_world(world: &mut World) -> Self {
         if let Some(next) = world.remove_resource::<super::replay_log::NextReplay>() {
             return Self::from_replay(next);
+        }
+        if let Some(next) = world.remove_resource::<super::autosave::NextResume>() {
+            let r = next.replay;
+            return Self::new(Session::resume(&r.frames, r.ticks));
         }
         match world.remove_resource::<NextNetMatch>() {
             Some(next) => Self::from_next(next),
